@@ -96,7 +96,7 @@ impl Monitor {
 
             if should_warn(ram_config, available, percent_free as f32) && self.can_warn(ctx) {
                 self.last_warn_time = Some(now);
-                return MonitorStatus::Warn(format!("Low RAM: {} ({:.1}%) free", Byte::from_u64(available).get_appropriate_unit(byte_unit::UnitType::Decimal), percent_free));
+                return MonitorStatus::Warn(format!("Low RAM: {:.2} ({:.2}%) free", Byte::from_u64(available).get_appropriate_unit(byte_unit::UnitType::Decimal), percent_free));
             }
         }
 
@@ -114,7 +114,7 @@ impl Monitor {
 
                 if should_warn(swap_config, free, percent_free as f32) && self.can_warn(ctx) {
                     self.last_warn_time = Some(now);
-                    return MonitorStatus::Warn(format!("Low Swap: {} ({:.1}%) free", Byte::from_u64(free).get_appropriate_unit(byte_unit::UnitType::Decimal), percent_free));
+                    return MonitorStatus::Warn(format!("Low Swap: {:.2} ({:.2}%) free", Byte::from_u64(free).get_appropriate_unit(byte_unit::UnitType::Decimal), percent_free));
                 }
             }
         }
