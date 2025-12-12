@@ -5,6 +5,7 @@ use std::process::exit;
 use directories::ProjectDirs;
 use regex::Regex;
 use log::info;
+use crate::psi;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -238,15 +239,10 @@ impl Config {
 
         // Exit Code 7: PSI availability
         if self.psi.is_some() {
-             let psi_path = Path::new("/proc/pressure/memory");
-             if !psi_path.exists() {
-                 eprintln!("Error: PSI enabled but /proc/pressure/memory not available.");
-                 exit(7);
-             }
-             if fs::read_to_string(psi_path).is_err() {
-                 eprintln!("Error: PSI enabled but cannot read /proc/pressure/memory.");
-                 exit(7);
-             }
+            if let Err(e) = psi::read_psi_total() {
+                eprintln!("Error: PSI enabled but /proc/pressure/memory is not valid: {}", e);
+                exit(7);
+            }
         }
     }
 }
@@ -267,3 +263,4 @@ fn compile_patterns(raw: &[String]) -> Vec<Pattern> {
         }
     }).collect()
 }
+
