@@ -5,11 +5,19 @@ use nix::unistd::Pid as NixPid;
 use std::thread;
 use std::time::Duration;
 use std::fs;
+use std::cmp::Ordering;
 use log::{info, warn, error};
 use notify_rust::Notification;
 
 pub struct Killer {
     system: System,
+}
+
+// Internal struct to handle the ranking logic (Process + KillScore + MatchPriority)
+struct KillCandidate {
+    pid: sysinfo::Pid,
+    score: u64,           // RSS (bytes) or OOM Score (normalized to u64)
+    match_index: usize,   // 0..N for explicit targets, usize::MAX for non-matches
 }
 
 impl Killer {
@@ -24,32 +32,34 @@ impl Killer {
     pub fn kill_sequence(&mut self, ctx: &RuntimeContext, reason_desc: &str, mut amount_needed: Option<u64>) {
         info!("Initiating Kill Sequence. Reason: {}. Needed: {:?}", reason_desc, amount_needed);
         
-        // We might need to kill multiple times
         loop {
+            // 1. Refresh World State
             self.system.refresh_processes(ProcessesToUpdate::All, true);
-            let mut candidates = self.find_candidates(ctx);
+            
+            // 2. Get Candidates (Sorted by Priority -> Score)
+            let candidates = self.get_ranked_candidates(ctx);
             
             if candidates.is_empty() {
                 warn!("No eligible kill candidates found!");
                 break;
             }
 
-            self.sort_candidates(&mut candidates, ctx.config.kill_strategy);
-
-            if let Some(victim_pid) = candidates.first() {
-                // Get process info before killing to know how much we might free
-                if let Some(victim) = self.system.process(*victim_pid) {
-                    let victim_mem = victim.memory(); // In bytes
+            // 3. Pick the Top Candidate
+            if let Some(candidate) = candidates.first() {
+                if let Some(victim) = self.system.process(candidate.pid) {
+                    let victim_mem = victim.memory();
                     let victim_name = victim.name().to_string_lossy().to_string();
                     let victim_start_time = victim.start_time();
 
-                    info!("Selected victim: {} (PID: {}). Memory: {} bytes.", victim_name, victim_pid, victim_mem);
+                    info!("Selected victim: {} (PID: {}). Score: {}. MatchPriority: {}", 
+                        victim_name, candidate.pid, candidate.score, 
+                        if candidate.match_index == usize::MAX { "None".to_string() } else { candidate.match_index.to_string() }
+                    );
 
-                    if self.kill_process(ctx, *victim_pid, &victim_name, victim_start_time) {
-                         // Success
+                    if self.kill_process(ctx, candidate.pid, &victim_name, victim_start_time) {
                          if let Some(needed) = amount_needed {
                              if victim_mem >= needed {
-                                 info!("Freed approximately {} bytes (needed {}). Stopping kill sequence.", victim_mem, needed);
+                                 info!("Freed approx {} bytes (needed {}). Stopping sequence.", victim_mem, needed);
                                  break;
                              } else {
                                  amount_needed = Some(needed - victim_mem);
@@ -63,64 +73,75 @@ impl Killer {
                         break;
                     }
                 } else {
-                    warn!("Selected victim {} vanished before kill.", victim_pid);
+                    // Process vanished between list generation and access
                     continue;
                 }
             }
         }
     }
 
-    fn find_candidates(&self, ctx: &RuntimeContext) -> Vec<sysinfo::Pid> {
+    // Replaces find_candidates + sort_candidates
+    fn get_ranked_candidates(&self, ctx: &RuntimeContext) -> Vec<KillCandidate> {
         let my_pid = std::process::id();
         
-        self.system.processes().iter()
+        let mut candidates: Vec<KillCandidate> = self.system.processes().iter()
             .filter(|(pid, process)| {
-                let pid = **pid; // pid is &&Pid, so deref twice to get Pid (which is Copy)
-                if pid.as_u32() == my_pid { return false; } // Don't kill self
+                // Filter 1: Never kill self
+                if pid.as_u32() == my_pid { return false; } 
 
+                // Filter 2: Never kill Ignored Names
                 let name = process.name().to_string_lossy();
-                // Check ignore list
                 for pat in &ctx.ignore_names_regex {
                     if pat.matches(&name) { return false; }
                 }
-
-                // Check kill targets
-                let mut matched = false;
-                for pat in &ctx.kill_targets_regex {
-                    if pat.matches(&name) { matched = true; break; }
-                }
-                
-                if !matched {
-                    let cmd_line = process.cmd().iter()
+                true
+            })
+            .map(|(pid, process)| {
+                let name = process.name().to_string_lossy();
+                let cmd_line = process.cmd().iter()
                         .map(|s| s.to_string_lossy())
                         .collect::<Vec<_>>()
                         .join(" ");
-                        
-                    for pat in &ctx.kill_targets_regex {
-                        if pat.matches(&cmd_line) { matched = true; break; }
+
+                // 1. Calculate Match Priority (KillTargetMatch)
+                // We search for the *first* match in kill_targets to determine priority.
+                // 0 = Highest Priority. usize::MAX = No Match (General Population).
+                let mut match_index = usize::MAX;
+                
+                for (idx, pat) in ctx.kill_targets_regex.iter().enumerate() {
+                    if pat.matches(&name) || pat.matches(&cmd_line) {
+                        match_index = idx;
+                        break;
                     }
                 }
-                
-                matched
-            })
-            .map(|(&pid, _)| pid)
-            .collect()
-    }
 
-    fn sort_candidates(&self, candidates: &mut Vec<sysinfo::Pid>, strategy: KillStrategy) {
-        candidates.sort_by(|a, b| {
-            let proc_a = self.system.process(*a).unwrap();
-            let proc_b = self.system.process(*b).unwrap();
+                // 2. Calculate Kill Score
+                let score = match ctx.config.kill_strategy {
+                    KillStrategy::LargestRss => process.memory(),
+                    KillStrategy::HighestOomScore => get_oom_score(*pid) as u64,
+                };
 
-            match strategy {
-                KillStrategy::LargestRss => proc_b.memory().cmp(&proc_a.memory()), // Descending
-                KillStrategy::HighestOomScore => {
-                    let score_a = get_oom_score(*a);
-                    let score_b = get_oom_score(*b);
-                    score_b.cmp(&score_a) // Descending
+                KillCandidate {
+                    pid: *pid,
+                    score,
+                    match_index,
                 }
+            })
+            .collect();
+
+        // 3. Sort: First by Match Priority (Ascending), Then by Score (Descending)
+        candidates.sort_by(|a, b| {
+            // Compare Match Index (Lower index = Higher priority)
+            match a.match_index.cmp(&b.match_index) {
+                Ordering::Equal => {
+                    // If priority is same, largest score dies first
+                    b.score.cmp(&a.score)
+                },
+                other => other,
             }
         });
+
+        candidates
     }
 
     fn kill_process(&mut self, ctx: &RuntimeContext, pid: sysinfo::Pid, name: &str, create_time: u64) -> bool {
@@ -134,26 +155,20 @@ impl Killer {
 
         thread::sleep(Duration::from_millis(ctx.config.sigterm_wait_ms));
 
-        // Verify if still running and same process
-        // We use refresh_processes with a specific PID filter if possible, or just refresh all?
-        // sysinfo 0.37 doesn't seem to have `refresh_process(pid)`.
-        // It has `refresh_processes` taking `ProcessesToUpdate`.
-        // We can pass `ProcessesToUpdate::Some(&[pid])`.
-        
+        // Refill process list specifically to check this PID
         self.system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
         
+        // Check if gone
         if self.system.process(pid).is_none() {
-             // Process is gone
-             info!("Process {} terminated gracefully after SIGTERM.", pid);
+             info!("Process {} terminated gracefully.", pid);
              send_notification("System Load Shedding", &format!("Terminated process '{}' (PID {}) to prevent system freeze.", name, pid), "process-stop");
              return true;
         }
         
-        // Process exists, check start time
+        // Check if PID reused (safety)
         if let Some(process) = self.system.process(pid) {
             if process.start_time() != create_time {
                  info!("Process {} terminated (PID reused).", pid);
-                 send_notification("System Load Shedding", &format!("Terminated process '{}' (PID {}) to prevent system freeze.", name, pid), "process-stop");
                  return true;
             }
         }
