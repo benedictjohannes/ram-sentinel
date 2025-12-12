@@ -57,6 +57,21 @@ pub enum KillStrategy {
     HighestOomScore,
 }
 
+impl PsiConfig {
+    fn is_effectively_empty(&self) -> bool {
+        self.warn_max_percent.is_none() && self.kill_max_percent.is_none()
+    }
+}
+
+impl MemoryConfig {
+    fn is_effectively_empty(&self) -> bool {
+        self.warn_min_free_bytes.is_none()
+            && self.warn_min_free_percent.is_none()
+            && self.kill_min_free_bytes.is_none()
+            && self.kill_min_free_percent.is_none()
+    }
+}
+
 // Default Generators
 fn default_interval() -> u64 { 1000 }
 fn warn_interval() -> u64 { 30000 }
@@ -198,7 +213,11 @@ impl Config {
 
     fn validate(&self, _path: Option<&Path>) {
         // Exit Code 4: Effectively empty
-        if self.psi.is_none() && self.ram.is_none() && self.swap.is_none() {
+        let psi_empty = self.psi.as_ref().map_or(true, |p| p.is_effectively_empty());
+        let ram_empty = self.ram.as_ref().map_or(true, |r| r.is_effectively_empty());
+        let swap_empty = self.swap.as_ref().map_or(true, |s| s.is_effectively_empty());
+
+        if psi_empty && ram_empty && swap_empty {
             eprintln!("Error: Configuration is effectively empty (no metrics enabled).");
             exit(4);
         }
