@@ -150,14 +150,22 @@ impl Config {
         });
 
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("yaml");
-        let config: Config = match ext {
-            "yaml" | "yml" => serde_yaml::from_str(&content).expect("Failed to parse YAML config"),
-            "json" => serde_json::from_str(&content).expect("Failed to parse JSON config"),
-            "toml" => toml::from_str(&content).expect("Failed to parse TOML config"),
-            _ => serde_yaml::from_str(&content).expect("Failed to parse YAML config"), // Default to yaml
-        };
 
-        config
+        macro_rules! parse_err {
+            ($r:expr) => {
+                $r.map_err(|e| {
+                    eprintln!("Error parsing config file {:?}: {}", path, e);
+                    exit(3);
+                })
+            };
+        }
+
+        match ext {
+            "yaml" | "yml" => parse_err!(serde_yaml::from_str(&content)).unwrap(),
+            "json" => parse_err!(serde_json::from_str(&content)).unwrap(),
+            "toml" => parse_err!(toml::from_str(&content)).unwrap(),
+            _ => parse_err!(serde_yaml::from_str(&content)).unwrap(),
+        }
     }
 
     pub fn sane_defaults() -> Config {
