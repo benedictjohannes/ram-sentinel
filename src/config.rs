@@ -236,12 +236,17 @@ impl Config {
             eprintln!("Error: check_interval_ms > 300000.");
             exit(6);
         }
+        // Exit Code 7: Interval too low
+        if self.check_interval_ms <= 100 {
+            eprintln!("Error: check_interval_ms < 100.");
+            exit(7);
+        }
 
-        // Exit Code 7: PSI availability
+        // Exit Code 8: PSI availability
         if self.psi.is_some() {
             if let Err(e) = psi::read_psi_total() {
                 eprintln!("Error: PSI enabled but /proc/pressure/memory is not valid: {}", e);
-                exit(7);
+                exit(8);
             }
         }
     }
