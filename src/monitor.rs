@@ -1,6 +1,5 @@
-use crate::config::{RuntimeContext, MemoryConfig};
+use crate::{config::{MemoryConfig, RuntimeContext}, psi::read_psi_total};
 use sysinfo::{System, RefreshKind, MemoryRefreshKind};
-use std::fs;
 use std::time::Instant;
 use byte_unit::Byte;
 
@@ -31,7 +30,7 @@ impl Monitor {
         );
         system.refresh_memory();
         
-        let (total, _) = Self::read_psi_total();
+        let (total, _) = Self::read_psi();
 
         Self {
             system,
@@ -54,7 +53,7 @@ impl Monitor {
 
         // 1. PSI Check
         if let Some(psi_config) = &ctx.config.psi {
-            let (current_total, current_time) = Self::read_psi_total();
+            let (current_total, current_time) = Self::read_psi();
             // Calculate pressure
             let time_delta_us = current_time.duration_since(self.last_psi_time).as_micros() as f64;
             let total_delta = (current_total.saturating_sub(self.last_psi_total)) as f64;
@@ -129,18 +128,9 @@ impl Monitor {
         }
     }
 
-    fn read_psi_total() -> (u64, Instant) {
-        // Reads /proc/pressure/memory
-        let content = fs::read_to_string("/proc/pressure/memory").unwrap_or_default();
-        for line in content.lines() {
-            if line.starts_with("some") {
-                if let Some(pos) = line.find("total=") {
-                    let val_str = &line[pos+6..];
-                    if let Ok(val) = val_str.trim().parse::<u64>() {
-                        return (val, Instant::now());
-                    }
-                }
-            }
+    fn read_psi() -> (u64, Instant) {
+        if let Ok(val) = read_psi_total() {
+            return (val, Instant::now());
         }
         (0, Instant::now())
     }
