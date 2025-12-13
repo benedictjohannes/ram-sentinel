@@ -96,7 +96,7 @@ killTargets:
   # These are killed FIRST.
   - type=renderer       # Chrome/Electron tabs
   - -contentproc        # Firefox tabs
-  - ^/usr/bin/node      # Strict prefix match for local node scripts
+  - ^/usr/bin/node      # Strict prefix match for processes you want to target first, e.g. for local node scripts
 killStrategy: highestOomScore
 ```
 
