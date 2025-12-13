@@ -53,9 +53,10 @@ pub fn read_psi_total() -> Result<u64, PsiError> {
 
     for line in content.lines() {
         if line.starts_with("some") {
-            if let Some(pos) = line.find("total=") {
-                let val_str = &line[pos + 6..];
-                return Ok(val_str.trim().parse::<u64>()?);
+            for part in line.split_whitespace() {
+                if let Some(val_str) = part.strip_prefix("total=") {
+                    return Ok(val_str.parse::<u64>()?);
+                }
             }
         }
     }
