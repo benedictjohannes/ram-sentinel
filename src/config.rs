@@ -244,9 +244,11 @@ impl Config {
                 eprintln!("Error: PSI kill_max_percent set but amount_to_free is missing.");
                 exit(7);
             }
-            if parse_size(psi.amount_to_free.as_ref().unwrap()) == 0 {
-                eprintln!("Error: PSI amount_to_free is illegal.");
-                exit(7);
+            if let Some(ref amt) = psi.amount_to_free {
+                if parse_size(amt) == 0 {
+                    eprintln!("Error: PSI amount_to_free is illegal.");
+                    exit(7);
+                }
             }
         }
 
