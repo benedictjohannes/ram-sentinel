@@ -111,6 +111,7 @@ impl Config {
         let (config, path_loaded) = match cli_config_path {
             Some(path) => {
                 if !path.exists() {
+                    // Exit code 2: Error reading config file
                     eprintln!("Error: Config file specified but not found: {:?}", path);
                     exit(2);
                 }
@@ -161,6 +162,7 @@ impl Config {
 
     fn parse_file(path: &Path) -> Config {
         let content = fs::read_to_string(path).unwrap_or_else(|e| {
+            // Exit code 2: Error reading config file
             eprintln!("Error reading config file {:?}: {}", path, e);
             exit(2);
         });
@@ -170,6 +172,7 @@ impl Config {
         macro_rules! parse_err {
             ($r:expr) => {
                 $r.map_err(|e| {
+                    // Exit code 3: Error parsing config file
                     eprintln!("Error parsing config file {:?}: {}", path, e);
                     exit(3);
                 })
@@ -213,11 +216,11 @@ impl Config {
     }
 
     fn validate(&self, _path: Option<&Path>) {
-        // Exit Code 4: Effectively empty
         let psi_empty = self.psi.as_ref().map_or(true, |p| p.is_effectively_empty());
         let ram_empty = self.ram.as_ref().map_or(true, |r| r.is_effectively_empty());
         let swap_empty = self.swap.as_ref().map_or(true, |s| s.is_effectively_empty());
-
+        
+        // Exit Code 4: Effectively empty
         if psi_empty && ram_empty && swap_empty {
             eprintln!("Error: Configuration is effectively empty (no metrics enabled).");
             exit(4);
