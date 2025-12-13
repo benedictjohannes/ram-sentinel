@@ -1,7 +1,7 @@
 use crate::config::{RuntimeContext, KillStrategy};
 use sysinfo::{System, RefreshKind, ProcessRefreshKind, ProcessesToUpdate};
 use nix::sys::signal::{kill, Signal};
-use nix::unistd::Pid as NixPid;
+use nix::unistd::{Pid as NixPid, Uid};
 use std::thread;
 use std::time::Duration;
 use std::fs;
@@ -83,13 +83,27 @@ impl Killer {
     // Replaces find_candidates + sort_candidates
     fn get_ranked_candidates(&self, ctx: &RuntimeContext) -> Vec<KillCandidate> {
         let my_pid = std::process::id();
+        let current_uid = Uid::effective();
+        let is_root = current_uid.is_root();
+        let current_uid_str = current_uid.to_string();
         
         let mut candidates: Vec<KillCandidate> = self.system.processes().iter()
             .filter(|(pid, process)| {
                 // Filter 1: Never kill self
                 if pid.as_u32() == my_pid { return false; } 
 
-                // Filter 2: Never kill Ignored Names
+                // Filter 2: Ownership Check (if not root)
+                if !is_root {
+                    if let Some(proc_uid) = process.user_id() {
+                        if proc_uid.to_string() != current_uid_str {
+                            return false;
+                        }
+                    } else {
+                        return false;
+                    }
+                }
+
+                // Filter 3: Never kill Ignored Names
                 let name = process.name().to_string_lossy();
                 for pat in &ctx.ignore_names_regex {
                     if pat.matches(&name) { return false; }
