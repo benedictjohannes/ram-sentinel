@@ -123,7 +123,7 @@ impl PsiConfigParsed {
             None
         };
 
-        let check_interval_ms = config.check_interval_ms.unwrap_or(global_interval * 10);
+        let check_interval_ms = config.check_interval_ms.unwrap_or_else(|| { std::cmp::min(global_interval * 10, 300_000) });
 
         if check_interval_ms < 100 || check_interval_ms > 300000 {
             return Err(PsiError::ValidationError(
