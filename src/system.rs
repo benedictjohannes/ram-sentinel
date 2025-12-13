@@ -2,7 +2,7 @@ pub fn get_systemd_unit() -> &'static str {
     r#"[Unit]
 Description=RAM Sentinel - Userspace OOM Prevention Daemon
 Documentation=https://github.com/benedict/ram-sentinel
-After=network.target
+After=graphical-session.target.target
 
 [Service]
 Type=simple
