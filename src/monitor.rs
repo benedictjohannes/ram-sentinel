@@ -43,13 +43,7 @@ impl Monitor {
     pub fn check(&mut self, ctx: &RuntimeContext) -> MonitorStatus {
         self.system.refresh_memory();
         
-        // Check if we are in "Warn Reset" cooldown
         let now = Instant::now();
-        if let Some(last) = self.last_warn_time {
-            if (now.duration_since(last).as_millis() as u64) < ctx.warn_reset_ms {
-                // Cooldown active
-            }
-        }
 
         // 1. PSI Check
         if let Some(psi_config) = &ctx.psi {
