@@ -33,7 +33,7 @@ jobs:
           toolchain: ${{ matrix.toolchain }}
 
       - name: Check Cargo.lock consistency
-        run: cargo check --frozen
+        run: cargo check --locked
 
       - name: Build release binary
         run: cargo build --verbose --release
