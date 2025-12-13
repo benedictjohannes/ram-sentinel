@@ -11,6 +11,7 @@ pub enum PsiError {
     Io(io::Error),
     FieldNotFound,
     Parse(ParseIntError),
+    ValidationError(String), // New variant for validation errors
 }
 
 impl fmt::Display for PsiError {
@@ -19,6 +20,7 @@ impl fmt::Display for PsiError {
             PsiError::Io(e) => write!(f, "Filesystem access error: {}", e),
             PsiError::FieldNotFound => write!(f, "PSI field 'some total=' was not found."),
             PsiError::Parse(e) => write!(f, "Value parsing error: {}", e),
+            PsiError::ValidationError(msg) => write!(f, "Configuration validation error: {}", msg),
         }
     }
 }
@@ -29,6 +31,7 @@ impl Error for PsiError {
             PsiError::Io(e) => Some(e),
             PsiError::Parse(e) => Some(e),
             PsiError::FieldNotFound => None,
+            PsiError::ValidationError(_) => None,
         }
     }
 }
@@ -79,15 +82,32 @@ pub struct PsiConfigParsed {
 }
 
 impl PsiConfigParsed {
-    pub fn from_config(config: PsiConfig) -> Self {
-        let amount_to_free = config.amount_to_free
-            .as_ref()
-            .map(|s| parse_size(s));
+    pub fn try_from_config(config: PsiConfig) -> Result<Self, PsiError> {
+        if config.kill_max_percent.is_some() && config.amount_to_free.is_none() {
+            return Err(PsiError::ValidationError("PSI kill_max_percent set but amount_to_free is missing.".to_string()));
+        }
+        
+        let amount_to_free = if let Some(amt_str) = config.amount_to_free {
+            let parsed_amt = parse_size(&amt_str).ok_or_else(|| {
+                PsiError::ValidationError(format!("PSI amount_to_free invalid format: {}", amt_str))
+            })?;
 
-        Self {
+            if parsed_amt == 0 {
+                return Err(PsiError::ValidationError("PSI amount_to_free is illegal (parses to 0).".to_string()));
+            }
+            Some(parsed_amt)
+        } else {
+            None
+        };
+
+        Ok(Self {
             warn_max_percent: config.warn_max_percent,
             kill_max_percent: config.kill_max_percent,
-            amount_to_free,
-        }
+            amount_to_free: amount_to_free,
+        })
     }
+}
+
+pub fn validate_psi_availability() -> Result<(), PsiError> {
+    read_psi_total().map(|_| ()) // Just check if it can be read, discard value
 }

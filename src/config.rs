@@ -54,10 +54,24 @@ pub struct MemoryConfigParsed {
 
 impl MemoryConfigParsed {
     pub fn from_config(config: MemoryConfig) -> Self {
+        let warn_min_free_bytes = config.warn_min_free_bytes.as_ref().map(|s| {
+            parse_size(s).unwrap_or_else(|| {
+                eprintln!("Error: Invalid size string in warnMinFreeBytes: '{}'", s);
+                exit(10);
+            })
+        });
+
+        let kill_min_free_bytes = config.kill_min_free_bytes.as_ref().map(|s| {
+            parse_size(s).unwrap_or_else(|| {
+                eprintln!("Error: Invalid size string in killMinFreeBytes: '{}'", s);
+                exit(10);
+            })
+        });
+
         Self {
-            warn_min_free_bytes: config.warn_min_free_bytes.as_ref().map(|s| parse_size(s)),
+            warn_min_free_bytes,
             warn_min_free_percent: config.warn_min_free_percent,
-            kill_min_free_bytes: config.kill_min_free_bytes.as_ref().map(|s| parse_size(s)),
+            kill_min_free_bytes,
             kill_min_free_percent: config.kill_min_free_percent,
         }
     }
@@ -142,8 +156,24 @@ impl Config {
         let ignore_names_regex = compile_patterns(&config.ignore_names, "ignore_names");
         let kill_targets_regex = compile_patterns(&config.kill_targets, "kill_targets");
 
+        let psi_parsed = if let Some(p) = config.psi {
+            let parsed = psi::PsiConfigParsed::try_from_config(p).unwrap_or_else(|e| {
+                eprintln!("Error: {}", e);
+                exit(7);
+            });
+
+            // Exit Code 8: PSI availability
+            if let Err(e) = psi::validate_psi_availability() {
+                eprintln!("Error: PSI enabled but /proc/pressure/memory is not valid: {}", e);
+                exit(8);
+            }
+            Some(parsed)
+        } else {
+            None
+        };
+
         RuntimeContext {
-            psi: config.psi.map(psi::PsiConfigParsed::from_config),
+            psi: psi_parsed,
             ram: config.ram.map(MemoryConfigParsed::from_config),
             swap: config.swap.map(MemoryConfigParsed::from_config),
             check_interval_ms: config.check_interval_ms,
@@ -258,30 +288,7 @@ impl Config {
             eprintln!("Error: check_interval_ms < 100.");
             exit(6);
         }
-        
-        // Exit Code 7: PSI logical error
-        if let Some(psi) = &self.psi {
-            if psi.kill_max_percent.is_some() && psi.amount_to_free.is_none() {
-                eprintln!("Error: PSI kill_max_percent set but amount_to_free is missing.");
-                exit(7);
-            }
-            if let Some(ref amt) = psi.amount_to_free {
-                if parse_size(amt) == 0 {
-                    eprintln!("Error: PSI amount_to_free is illegal.");
-                    exit(7);
-                }
-            }
-        }
-
-        // Exit Code 8: PSI availability
-        if self.psi.is_some() {
-            if let Err(e) = psi::read_psi_total() {
-                eprintln!("Error: PSI enabled but /proc/pressure/memory is not valid: {}", e);
-                exit(8);
-            }
-        }
-    }
-}
+    }}
 
 fn compile_patterns(raw: &[String], field_name: &str) -> Vec<Pattern> {
     raw.iter().enumerate().map(|(i, s)| {

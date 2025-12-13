@@ -30,12 +30,12 @@ impl Monitor {
         );
         system.refresh_memory();
         
-        let (total, _) = Self::read_psi();
+        let (total, time) = Self::read_psi().unwrap_or((0, Instant::now()));
 
         Self {
             system,
             last_psi_total: total,
-            last_psi_time: Instant::now(),
+            last_psi_time: time,
             last_warn_time: None,
         }
     }
@@ -53,32 +53,33 @@ impl Monitor {
 
         // 1. PSI Check
         if let Some(psi_config) = &ctx.psi {
-            let (current_total, current_time) = Self::read_psi();
-            // Calculate pressure
-            let time_delta_us = current_time.duration_since(self.last_psi_time).as_micros() as f64;
-            let total_delta = (current_total.saturating_sub(self.last_psi_total)) as f64;
-            
-            let pressure = if time_delta_us > 0.0 {
-                (total_delta / time_delta_us) * 100.0
-            } else {
-                0.0
-            };
+            if let Some((current_total, current_time)) = Self::read_psi() {
+                // Calculate pressure
+                let time_delta_us = current_time.duration_since(self.last_psi_time).as_micros() as f64;
+                let total_delta = (current_total.saturating_sub(self.last_psi_total)) as f64;
+                
+                let pressure = if time_delta_us > 0.0 {
+                    (total_delta / time_delta_us) * 100.0
+                } else {
+                    0.0
+                };
 
-            // Update state
-            self.last_psi_total = current_total;
-            self.last_psi_time = current_time;
+                // Update state
+                self.last_psi_total = current_total;
+                self.last_psi_time = current_time;
 
-            if let Some(kill_max) = psi_config.kill_max_percent {
-                if pressure as f32 > kill_max {
-                    let amount = psi_config.amount_to_free.unwrap_or(0);
-                    return MonitorStatus::Kill(KillReason::PsiPressure(pressure as f32, amount));
+                if let Some(kill_max) = psi_config.kill_max_percent {
+                    if pressure as f32 > kill_max {
+                        let amount = psi_config.amount_to_free.unwrap_or(0);
+                        return MonitorStatus::Kill(KillReason::PsiPressure(pressure as f32, amount));
+                    }
                 }
-            }
 
-            if let Some(warn_max) = psi_config.warn_max_percent {
-                if pressure as f32 > warn_max && self.can_warn(ctx) {
-                    self.last_warn_time = Some(now);
-                    return MonitorStatus::Warn(format!("Memory pressure reached {:.1}%", pressure));
+                if let Some(warn_max) = psi_config.warn_max_percent {
+                    if pressure as f32 > warn_max && self.can_warn(ctx) {
+                        self.last_warn_time = Some(now);
+                        return MonitorStatus::Warn(format!("Memory pressure reached {:.1}%", pressure));
+                    }
                 }
             }
         }
@@ -128,11 +129,11 @@ impl Monitor {
         }
     }
 
-    fn read_psi() -> (u64, Instant) {
+    fn read_psi() -> Option<(u64, Instant)> {
         if let Ok(val) = read_psi_total() {
-            return (val, Instant::now());
+            return Some((val, Instant::now()));
         }
-        (0, Instant::now())
+        None
     }
     
     pub fn get_system(&self) -> &System {
