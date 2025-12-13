@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -55,4 +56,22 @@ pub fn read_psi_total() -> Result<u64, PsiError> {
         }
     }
     Err(PsiError::FieldNotFound)
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct PsiConfig {
+    pub warn_max_percent: Option<f32>,
+    pub kill_max_percent: Option<f32>,
+    pub amount_to_free: Option<String>,
+}
+impl PsiConfig {
+    pub fn is_effectively_empty(&self) -> bool {
+        self.warn_max_percent.is_none() && self.kill_max_percent.is_none()
+    }
+}
+pub struct PsiConfigParsed {
+    pub warn_max_percent: Option<f32>,
+    pub kill_max_percent: Option<f32>,
+    pub amount_to_free: Option<u64>,
 }

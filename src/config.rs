@@ -12,7 +12,7 @@ use crate::utils::parse_size;
 #[serde(rename_all = "camelCase")]
 pub struct Config {
     // Metric Triggers
-    pub psi: Option<PsiConfig>,
+    pub psi: Option<psi::PsiConfig>,
     pub ram: Option<MemoryConfig>,
     pub swap: Option<MemoryConfig>,
 
@@ -35,13 +35,6 @@ pub struct Config {
     pub kill_strategy: KillStrategy,
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct PsiConfig {
-    pub warn_max_percent: Option<f32>,
-    pub kill_max_percent: Option<f32>,
-    pub amount_to_free: Option<String>,
-}
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -57,12 +50,6 @@ pub struct MemoryConfig {
 pub enum KillStrategy {
     LargestRss,
     HighestOomScore,
-}
-
-impl PsiConfig {
-    fn is_effectively_empty(&self) -> bool {
-        self.warn_max_percent.is_none() && self.kill_max_percent.is_none()
-    }
 }
 
 impl MemoryConfig {
@@ -190,7 +177,7 @@ impl Config {
 
     pub fn sane_defaults() -> Config {
         Config {
-            psi: Some(PsiConfig {
+            psi: Some(psi::PsiConfig {
                 warn_max_percent: None,
                 kill_max_percent: None,
                 amount_to_free: None,
