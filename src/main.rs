@@ -15,11 +15,19 @@ use std::path::PathBuf;
 use std::process::exit;
 use std::thread::sleep;
 use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use nix::sys::signal::{signal, SigHandler, Signal};
 
 use crate::config::{Config, MemoryConfigParsed, RuntimeContext};
 use crate::killer::Killer;
 use crate::monitor::{KillReason, Monitor, MonitorStatus};
 use crate::system::get_systemd_unit;
+
+static RUNNING: AtomicBool = AtomicBool::new(true);
+
+extern "C" fn handle_shutdown_signal(_: i32) {
+    RUNNING.store(false, Ordering::SeqCst);
+}
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -58,6 +66,18 @@ fn handle_output(path_arg: Option<PathBuf>, content: &str) {
 
 fn main() {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
+    
+    // Register signal handlers
+    unsafe {
+        let handler = SigHandler::Handler(handle_shutdown_signal);
+        if let Err(e) = signal(Signal::SIGTERM, handler) {
+            error!("Failed to register SIGTERM handler: {}", e);
+        }
+        if let Err(e) = signal(Signal::SIGINT, handler) {
+            error!("Failed to register SIGINT handler: {}", e);
+        }
+    }
+
     let args = Cli::parse();
 
     // --- Handle Utility Flags ---
@@ -89,7 +109,7 @@ fn run_loop(ctx: RuntimeContext, no_kill: bool) {
         ctx.check_interval_ms
     );
 
-    loop {
+    while RUNNING.load(Ordering::SeqCst) {
         match monitor.check(&ctx) {
             MonitorStatus::Normal => {
                 debug!("Status: Normal");
@@ -107,21 +127,28 @@ fn run_loop(ctx: RuntimeContext, no_kill: bool) {
                 } else {
                     let amount_needed = match reason {
                         KillReason::PsiPressure(_, amount) => Some(amount),
-                        KillReason::LowMemory(available) => {
+                        KillReason::LowMemory(_) => {
                             if let Some(config) = &ctx.ram {
-                                calc_needed(config, available, monitor.get_system().total_memory())
+                                monitor.refresh_memory();
+                                calc_needed(config, monitor.get_system().available_memory(), monitor.get_system().total_memory())
                             } else {
                                 None
                             }
                         }
-                        KillReason::LowSwap(free) => {
+                        KillReason::LowSwap(_) => {
                             if let Some(config) = &ctx.swap {
-                                calc_needed(config, free, monitor.get_system().total_swap())
+                                monitor.refresh_memory();
+                                calc_needed(config, monitor.get_system().free_swap(), monitor.get_system().total_swap())
                             } else {
                                 None
                             }
                         }
                     };
+
+                    if amount_needed.is_none() {
+                        info!("Kill sequence aborted: calculated needed memory is 0 (system likely recovered).");
+                        continue;
+                    }
 
                     killer.kill_sequence(&ctx, &reason_desc, amount_needed);
                 }
@@ -130,6 +157,8 @@ fn run_loop(ctx: RuntimeContext, no_kill: bool) {
 
         sleep(Duration::from_millis(ctx.check_interval_ms));
     }
+    
+    info!("Exiting ram-sentinel.");
 }
 
 fn calc_needed(config: &MemoryConfigParsed, current_free: u64, total: u64) -> Option<u64> {
