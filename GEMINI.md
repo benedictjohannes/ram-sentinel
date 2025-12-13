@@ -49,6 +49,7 @@ The system uses a **Partial Override** model. Configuration is **immutable** at 
       - If `psi` is enabled but `/proc/pressure/memory` (specifically the `total` field) is unavailable/unreadable: **Exit Code 8**.
       - If any regex pattern in `killTargets` or `ignoreNames` is invalid: **Exit Code 9**.
       - If any memory size string (e.g. `warnMinFreeBytes`) is invalid: **Exit Code 10**.
+      - If percentage values (e.g. `warnMinFreePercentage`) is out of bound: **Exit Code 11**.
 4.  **Resolution Order:**
     CLI `--config` \> `$XDG_CONFIG_HOME/ram-sentinel.yaml` \> `.yml` \> `.json` \> `.toml` \> Defaults.
 
@@ -94,7 +95,7 @@ killStrategy: "highestOomScore"
 #### Kill Templates
 
   - **Kill Notification:**
-      - Icon: `dialog-warning` (or `process-stop` if preferred, but user confirmed `dialog-warning` works).
+      - Icon: `process-stop`
       - Title: "System Load Shedding"
       - Text: "Critical memory shortage detected. Terminated process '{PROCESS\_NAME}' (PID {PID}) to prevent system freeze."
 
@@ -111,7 +112,7 @@ killStrategy: "highestOomScore"
 **Phase 2: Configuration Loader (`config.rs`)**
 
   - Implement Structs and `Config::load()`.
-  - Implement `validate()` method to enforce constraints (PSI `amount_to_free`, Exit Codes 2-7).
+  - Implement `validate()` method to enforce constraints.
   - Implement `ByteSize` parsing.
   - **Optimization:** Compile all Regex patterns (ignore names / kill targets) immediately after config load. Store them in a `RuntimeContext` struct to avoid recompilation in the loop.
 
