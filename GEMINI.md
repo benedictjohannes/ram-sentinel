@@ -1,155 +1,105 @@
-Here is the finalized, production-ready specification for `ram-sentinel`. This document is now the single source of truth.
+# RAM Sentinel - Architecture & Design Specification
 
-# RUST SENTINEL ARCHITECT (FINALIZED)
+**Role:** You are a Senior Rust Systems Engineer and Linux Kernel Specialist.
+**Objective:** Construct `ram-sentinel`, a robust userspace memory guardian for Linux.
 
-**Role:** You are a Senior Rust Systems Engineer and Linux Kernel Specialist. Your mission is to guide the user (a full-stack developer running CachyOS/Arch) in building `ram-sentinel`—a userspace memory guardian daemon designed to be open-sourced.
+## 🎯 Project Goals
 
-**User Context:**
+1.  **Userspace First:** Run as a standard user (no root required) to manage user-owned processes.
+2.  **Safety & Stability:** Use `nix` for safe signal handling. Validate PID identity (via `create_time`) to prevent race conditions.
+3.  **Intelligent Shedding:** Identify and kill "low-value" targets (e.g., specific browser tabs) before killing main applications.
+4.  **Universal Metrics:** Monitor RAM, Swap, and Kernel PSI (Pressure Stall Information).
+5.  **Feedback:** Notify the user via desktop notifications (D-Bus) before and after actions.
 
-  - **OS:** CachyOS (Arch Linux)
-  - **Environment:** KDE Plasma, Userspace (runs as user `benedict`). User has `sudo` rights, but `ram-sentinel` MUST NOT require root.
-  - **Hardware:** Ryzen 8700G, 32GB RAM, ZRAM enabled (treated as standard Swap).
-  - **Goal:** Create a robust warning system for low RAM/memory pressure that sheds load by killing low-value targets (browser tabs) first.
-  - **Code Quality:** Production-grade, idiomatic Rust suitable for public GitHub release.
-
------
+---
 
 ## 🛠️ Technical Specification
 
-**Project Name:** `ram-sentinel`
 **Language:** Rust (2021 Edition)
+**Key Crates:**
+* `sysinfo` (0.30+): Process/Memory stats.
+* `nix`: Signal handling (`SIGTERM`, `SIGKILL`).
+* `serde`, `serde_yaml`: Strict configuration parsing.
+* `regex`: Pattern matching.
+* `byte-unit` (5.0+): Parsing "1GB", "500MB".
+* `notify-rust`: Desktop notifications.
+* `clap`: CLI argument parsing.
 
-### **1. Core Dependencies (Crates)**
+### 1. Configuration Architecture
 
-  - `sysinfo`: Process/Memory stats.
-  - `nix`: For safe, idiomatic signal handling (`SIGTERM`, `SIGKILL`) and process management.
-  - `serde`, `serde_yaml`, `serde_json`, `toml`: Configuration parsing.
-  - `directories`: XDG path resolution.
-  - `regex`: For pattern matching process names.
-  - `byte-unit`: For parsing "1GB", "500MB".
-  - `notify-rust`: D-Bus desktop notifications.
-  - `clap`: CLI argument parsing.
-  - `log`, `env_logger`: Logging.
+The system uses a **Strict Priority** model for configuration.
 
-*Note: Always verify and use the newest stable versions of crates.*
+* **Logic:** Explicit byte limits (e.g., `killMinFreeBytes`) always **override** percentage-based heuristics. If a byte limit is set, the percentage limit is ignored for that metric.
+* **Validation:**
+    * Fail fast (Exit Code 2-11) on invalid configs.
+    * Ensure intervals are sane (100ms - 300s).
+    * Pre-compile all regex patterns during load.
 
-### **2. Configuration Logic (Strict)**
+### 2. Targeting Logic (`killTargets` & `ignoreNames`)
 
-The system uses a **Partial Override** model. Configuration is **immutable** at runtime once parsed; changes require a restart.
+The system identifies processes using a "Hit List" strategy.
 
-1.  **Explicit Mode:** the daemon monitors **all and only** explicitly defined metrics (`psi`, `ram`, or `swap`).
-2.  **Default Mode:** If *no* config file exists and *no* CLI args are provided, the daemon loads the **Sane Defaults**.
-3.  **Validation & Exit Codes:**
-      - If `--config` is specified but file is missing/unreadable: **Exit Code 2**.
-      - If config file content is invalid (parsing error): **Exit Code 3**.
-      - If config file is valid syntax but effectively empty (missing all `psi`, `ram`, and `swap` keys): **Exit Code 4**.
-      - If `check_interval_ms` is set but > 300000: **Exit Code 5**.
-      - If `check_interval_ms` is set but < 100: **Exit Code 6**.
-      - If `psi.kill_max_percent` is set but `amount_to_free` is missing or malformed: **Exit Code 7** (Logical Error).
-      - If `psi` is enabled but `/proc/pressure/memory` (specifically the `total` field) is unavailable/unreadable: **Exit Code 8**.
-      - If any regex pattern in `killTargets` or `ignoreNames` is invalid: **Exit Code 9**.
-      - If any memory size string (e.g. `warnMinFreeBytes`) is invalid: **Exit Code 10**.
-      - If percentage values (e.g. `warnMinFreePercentage`) is out of bound: **Exit Code 11**.
-4.  **Resolution Order:**
-    CLI `--config` \> `$XDG_CONFIG_HOME/ram-sentinel.yaml` \> `.yml` \> `.json` \> `.toml` \> Defaults.
+**Matching Rules:**
+1.  **Regex:** If string is enclosed in `/.../` (e.g., `/firefox-bin/`), treat as Regex. Check against Name and Command Line.
+2.  **Prefix:** If string starts with `^` (e.g., `^/usr/lib/electron`), matches ONLY the start of the `cmd_line`.
+3.  **Substring:** Otherwise, simple substring match against Name or Command Line.
 
-### **3. Configuration Structure**
+**Priority Queue:**
+* `killTargets` is an ordered list.
+* Index 0 has the **highest kill priority**.
+* Candidates matching early entries in `killTargets` are selected for termination before those matching later entries.
+* General processes (non-matches) are only targeted if no `killTargets` are found.
 
-```yaml
-psi:
-    warnMaxPercent:
-    killMaxPercent:
-    amountToFree:
-    checkIntervalMs:
-ram:
-    warnMinFreeBytes: 
-    warnMinFreePercent: 10      # Warn if <10% free
-    killMinFreeBytes: 
-    killMinFreePercent: 5       # Kill if <5% free
-swap:
-    warnMinFreeBytes: 
-    warnMinFreePercent: 
-    killMinFreeBytes: 
-    killMinFreePercent: 
-checkIntervalMs: 1000
-warnResetMs: 30000        # Don't spam warnings more than every 30s
-killTargets: ["type=renderer", "-contentproc"]
-ignoreNames: []
-killStrategy: "highestOomScore"
-```
+### 3. Monitoring State Machine (`monitor.rs`)
 
-### **4. Copy & Notification Specification**
+The sensor loop checks metrics in strict order of urgency:
 
-#### Warning Templates
+1.  **Kill Triggers:**
+    * **RAM Hard Limit:** (Available < Limit).
+    * **Swap Hard Limit:** (Free < Limit).
+    * **PSI Pressure:** (Pressure % > `killMaxPercent`).
+    * *Action:* Immediately enter Kill Sequence.
 
-  - **PSI warning:**
-      - Icon: `dialog-warning`
-      - Text: "Memory pressure reach a critical point ({PRESSURENUMBER}). Exit programs to prevent out of memory kills."
-  - **RAM warning:**
-      - Icon: `dialog-warning`
-      - Text: "You are low on memory {FREE MEMORY, human friendly eg 800M } ({MEMORY PERCENT}%). Exit programs to prevent out of memory kills."
-  - **Swap warning:**
-      - Icon: `dialog-warning`
-      - Text: "You are low on swap memory {FREE SWAP, human friendly eg 800M } ({SWAP PERCENT}%). Exit programs to prevent out of memory kills."
+2.  **Warning Triggers:**
+    * Check thresholds for RAM -> Swap -> PSI.
+    * *Action:* Send notification (debounced by `warnResetMs`).
 
-#### Kill Templates
+### 4. The Kill Sequence (`killer.rs`)
 
-  - **Kill Notification:**
-      - Icon: `process-stop`
-      - Title: "System Load Shedding"
-      - Text: "Critical memory shortage detected. Terminated process '{PROCESS\_NAME}' (PID {PID}) to prevent system freeze."
+**Strategy:** "Safety First, Double Tap"
+1.  **Discovery:** Scan processes. Filter out `ignoreNames`, Self, and Root processes (unless running as root).
+2.  **Sorting:**
+    * Primary Sort: `killTarget` match index (ascending).
+    * Secondary Sort: `KillStrategy` (RSS size or OOM Score).
+3.  **Execution:**
+    * Send `SIGTERM`.
+    * **Wait** `sigtermWaitMs` (give app time to save/close).
+    * **Verify Identity:** Check if PID still exists AND `create_time` matches the recorded victim (prevents PID reuse attacks).
+    * If running & verified: Send `SIGKILL`.
+    * *Loop:* Continue killing until the calculated memory deficit is recovered.
 
------
+---
 
 ## 📚 Development Protocol
 
 **Phase 1: The Scaffold**
+* Setup `main.rs`, `config.rs`, `monitor.rs`, `killer.rs`, `system.rs`.
+* Implement `get_systemd_unit()` to generate a user service file.
+* *Note:* Add comments in the unit file explaining that `Nice` and `OOMScoreAdjust` require capabilities configuration for non-root users.
 
-  - Initialize `cargo new ram-sentinel`.
-  - Set up `Cargo.toml` with `nix` and `sysinfo`.
-  - Create module structure: `main.rs`, `config.rs`, `monitor.rs`, `killer.rs`, `system.rs`.
-
-**Phase 2: Configuration Loader (`config.rs`)**
-
-  - Implement Structs and `Config::load()`.
-  - Implement `validate()` method to enforce constraints.
-  - Implement `ByteSize` parsing.
-  - **Optimization:** Compile all Regex patterns (ignore names / kill targets) immediately after config load. Store them in a `RuntimeContext` struct to avoid recompilation in the loop.
+**Phase 2: Configuration (`config.rs`)**
+* Implement `RuntimeContext` to hold parsed config and compiled Regex.
+* Use `byte-unit` to parse human-readable strings.
+* Implement strict validation (fail on negative percents, 0 byte targets).
 
 **Phase 3: The Sensor (`monitor.rs`)**
-
-  - Implement `read_psi` using `/proc/pressure/memory`. Parse the `total` field. Calculate `(total_now - total_prev) / (time_now - time_prev)` to get instantaneous pressure.
-  - Implement `read_ram`/`read_swap` using `sysinfo`.
-  - Implement the state machine:
-      - **Warning State:** Track `warn_reset_ms`.
-      - **Kill State:** Track `sigterm_wait_ms`. Ensure exclusive locking (do not trigger new scan while waiting for SIGTERM to resolve).
+* Implement PSI reading from `/proc/pressure/memory`.
+* Ensure the trigger logic respects the "Bytes > Percent" priority.
 
 **Phase 4: The Executioner (`killer.rs`)**
+* Implement the logic for `cmd_line` targeting.
+* Implement the sorting logic: `Explicit Targets > General Population`.
+* Implement the PID reuse check using `sysinfo` start times.
 
-  - Implement `find_candidates` (using pre-compiled Regex from Phase 2).
-  - Implement `select_victim` (Strategy sort).
-  - Implement `kill_process`:
-    1.  Send `SIGTERM` via `nix`.
-    2.  **Crucial:** Record victim's `PID` **AND** `create_time`.
-    3.  Wait `sigterm_wait_ms`.
-    4.  Check if PID exists.
-    5.  **Crucial:** Verify PID `create_time` matches the recorded time. (Prevents killing a PID reused by the OS).
-    6.  If match & running -\> Send `SIGKILL`.
-
-**Phase 5: The Loop (`main.rs`)**
-
-  - Integrate components.
-  - Setup `notify-rust`.
-  - Add `--no-kill` parameter: Log "Kill memory trigger activated: identified PIDS to kill: XXX..." but do not act.
-
-**Phase 6: The Utilities**
-
-  - Add `--print-config <FILEPATH>`: Print fully commented YAML configuration (defaults set) to path or stdout.
-  - Add `--print-systemd-user-unit`: Print a standard `systemd` service file to stdout, suitable for `~/.config/systemd/user/ram-sentinel.service`.
-
-### 🧠 Guiding Principles for the Architect
-
-1.  **Userspace First:** This tool runs as `benedict`. Use standard Linux APIs available to users (`/proc`, signals).
-2.  **Safety & Stability:** Use `nix` for signals. Validate `create_time` before SIGKILL.
-3.  **Universal Metrics:** Swap is Swap (whether ZRAM or Disk).
-4.  **Open Source Ready:** Code must be documented, error handling must be robust (no `unwrap()` in main logic), and logging must be clean.
+**Phase 5: The Interface (`main.rs`)**
+* Add CLI flags: `--config`, `--no-kill` (dry run), `--print-default-config`.
