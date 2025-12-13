@@ -30,32 +30,47 @@ struct Cli {
     #[arg(long)]
     no_kill: bool,
 
-    #[arg(long, value_name = "FILE")]
+    #[arg(long, value_name = "FILE", num_args(0..=1), default_missing_value = "-")]
     print_config: Option<PathBuf>,
 
-    #[arg(long)]
-    print_systemd_user_unit: bool,
+    #[arg(long, value_name = "FILE", num_args(0..=1), default_missing_value = "-")]
+    print_systemd_user_unit: Option<PathBuf>,
+}
+
+fn handle_output(path_arg: Option<PathBuf>, content: &str) {
+    if let Some(path) = path_arg {
+        // Check for '-' to represent stdout piping
+        if path.to_string_lossy() == "-" {
+            println!("{}", content);
+        } else {
+            info!("Writing content to file: {:?}", path);
+            match fs::File::create(&path).and_then(|mut file| file.write_all(content.as_bytes())) {
+                Ok(_) => debug!("Successfully wrote to {:?}", path),
+                Err(e) => {
+                    error!("Error writing to file {:?}: {}", path, e);
+                    exit(1);
+                }
+            }
+        }
+        exit(0);
+    }
 }
 
 fn main() {
     env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
     let args = Cli::parse();
 
-    // Handle Utility Flags
-    if args.print_systemd_user_unit {
-        println!("{}", get_systemd_unit());
+    // --- Handle Utility Flags ---
+    if args.print_systemd_user_unit.is_some() {
+        let unit_content: String = get_systemd_unit();
+        handle_output(args.print_systemd_user_unit, &unit_content);
         return;
     }
-
-    if let Some(path) = args.print_config {
+    if args.print_config.is_some() {
         let defaults = Config::sane_defaults();
-        let yaml = serde_yaml::to_string(&defaults).expect("Failed to serialize config");
-
-        let mut file = fs::File::create(&path).unwrap_or_else(|e| {
-            eprintln!("Error creating file {:?}: {}", path, e);
-            exit(1);
-        });
-        file.write_all(yaml.as_bytes()).unwrap();
+        let yaml_content = serde_yaml::to_string(&defaults)
+            .expect("FATAL: Failed to serialize default configuration");
+        handle_output(args.print_config, &yaml_content);
         return;
     }
 
