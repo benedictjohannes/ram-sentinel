@@ -93,6 +93,13 @@ impl PsiConfigParsed {
                 ));
             }
         }
+        if let Some(kill) = config.kill_max_percent {
+            if kill < 0.0 || kill > 100.0 {
+                return Err(PsiError::ValidationError(
+                    format!("PSI warn_max_percent must be between 0-100, got {}", kill)
+                ));
+            }
+        }
 
         if config.kill_max_percent.is_some() && config.amount_to_free.is_none() {
             return Err(PsiError::ValidationError("PSI kill_max_percent set but amount_to_free is missing.".to_string()));

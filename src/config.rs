@@ -67,6 +67,20 @@ impl MemoryConfigParsed {
             })
         });
 
+        if let Some(p) = config.warn_min_free_percent {
+            if !(0.0..=100.0).contains(&p) {
+                eprintln!("Error: warnMinFreePercent must be between 0-100, got {}", p);
+                exit(11);
+            }
+        }
+
+        if let Some(p) = config.kill_min_free_percent {
+            if !(0.0..=100.0).contains(&p) {
+                eprintln!("Error: killMinFreePercent must be between 0-100, got {}", p);
+                exit(11);
+            }
+        }
+
         Self {
             warn_min_free_bytes,
             warn_min_free_percent: config.warn_min_free_percent,
