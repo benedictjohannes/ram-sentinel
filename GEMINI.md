@@ -41,99 +41,25 @@ The system uses a **Partial Override** model. Configuration is **immutable** at 
 2.  **Default Mode:** If *no* config file exists and *no* CLI args are provided, the daemon loads the **Sane Defaults**.
 3.  **Validation & Exit Codes:**
       - If `--config` is specified but file is missing/unreadable: **Exit Code 2**.
-      - If config file is valid syntax but effectively empty (missing all `psi`, `ram`, and `swap` keys): **Exit Code 4**.
       - If config file content is invalid (parsing error): **Exit Code 3**.
-      - If `psi.kill_max_percent` is set but `amount_to_free` is missing: **Exit Code 5** (Logical Error).
-      - If `check_interval_ms` is set but \> 300000: **Exit Code 6**.
-      - If `psi` is enabled but `/proc/pressure/memory` (specifically the `total` field) is unavailable/unreadable: **Exit Code 7**.
+      - If config file is valid syntax but effectively empty (missing all `psi`, `ram`, and `swap` keys): **Exit Code 4**.
+      - If `check_interval_ms` is set but > 300000: **Exit Code 5**.
+      - If `check_interval_ms` is set but < 100: **Exit Code 6**.
+      - If `psi.kill_max_percent` is set but `amount_to_free` is missing or malformed: **Exit Code 7** (Logical Error).
+      - If `psi` is enabled but `/proc/pressure/memory` (specifically the `total` field) is unavailable/unreadable: **Exit Code 8**.
+      - If any regex pattern in `killTargets` or `ignoreNames` is invalid: **Exit Code 9**.
+      - If any memory size string (e.g. `warnMinFreeBytes`) is invalid: **Exit Code 10**.
 4.  **Resolution Order:**
     CLI `--config` \> `$XDG_CONFIG_HOME/ram-sentinel.yaml` \> `.yml` \> `.json` \> `.toml` \> Defaults.
 
-### **3. Rust Configuration Structure**
-
-*Use this exact structure as the source of truth.*
-
-```rust
-use serde::Deserialize;
-
-#[derive(Debug, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct Config {
-    // Metric Triggers (Optional: If None, that metric is ignored)
-    pub psi: Option<PsiConfig>,
-    pub ram: Option<MemoryConfig>,
-    pub swap: Option<MemoryConfig>, // Swap free is measured via sysinfo().swap_free(). ZRAM is treated as generic Swap.
-
-    // Operational Settings
-    #[serde(default = "default_interval")]
-    pub check_interval_ms: u64, 
-    #[serde(default = "warn_interval")]
-    pub warn_reset_ms: u64, // Once ANY warning (RAM/SWAP/PSI) is triggered, no further warnings (any type) are shown until warn_reset_ms has elapsed. Defaults to 30000ms
-    #[serde(default = "sigterm_wait_ms")]
-    pub sigterm_wait_ms: u64, // when killing, we will send SIGTERM. After this interval, if process still running, send SIGKILL. Defaults to 5000ms.
-
-    // Targeting Logic
-    #[serde(default)]
-    pub ignore_names: Vec<String>, // Case sensitive substring match (or regex if wrapped in "/"). Excludes processes from being kill targets.
-    
-    #[serde(default = "default_kill_targets")] 
-    pub kill_targets: Vec<String>, // Case sensitive substring match (or regex if wrapped in "/"). Default: "type=renderer", "-contentproc". Order matters: checks these first before general strategies.
-    
-    #[serde(default = "default_strategy")]
-    pub kill_strategy: KillStrategy,
-}
-
-#[derive(Debug, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct PsiConfig {
-    // PSI is calculated using the "total" stall time delta between checks.
-    // Pressure % = ((total_now - total_prev) / (time_now - time_prev)) * 100.0
-    pub warn_max_percent: Option<f32>,
-    pub kill_max_percent: Option<f32>,
-    
-    // Must be present if kill_max_percent is set:
-    pub amount_to_free: Option<String>, // e.g., "500MB". Track variable amount_freed, continue killing until amount_freed > amount_to_free
-}
-
-#[derive(Debug, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct MemoryConfig {
-    // "Warn" Thresholds.
-    pub warn_min_free_bytes: Option<String>, // explicit (bytes) here wins over percent
-    pub warn_min_free_percent: Option<f32>, // Warn if free memory drops BELOW this
-
-    // "Kill" Thresholds. We kill until free mem or swap rises ABOVE kill_min_free...
-    pub kill_min_free_bytes: Option<String>, // explicit (bytes) here wins over percent
-    pub kill_min_free_percent: Option<f32>, // Kill if free memory drops BELOW this
-}
-
-#[derive(Debug, Deserialize, Clone, Copy)]
-#[serde(rename_all = "camelCase")]
-pub enum KillStrategy {
-    LargestRss,
-    HighestOomScore,
-}
-
-// Default Generators
-fn default_interval() -> u64 { 1000 }
-fn warn_interval() -> u64 { 30000 }
-fn sigterm_wait_ms() -> u64 { 5000 }
-fn default_strategy() -> KillStrategy { KillStrategy::HighestOomScore }
-fn default_kill_targets() -> Vec<String> {
-    vec![
-        "type=renderer".to_string(), // Chrome/Electron
-        "-contentproc".to_string()   // Firefox
-    ]
-}
-```
-
-The "sane defaults":
+### **3. Configuration Structure**
 
 ```yaml
 psi:
     warnMaxPercent:
     killMaxPercent:
     amountToFree:
+    checkIntervalMs:
 ram:
     warnMinFreeBytes: 
     warnMinFreePercent: 10      # Warn if <10% free
