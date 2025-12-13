@@ -1,7 +1,10 @@
 [package]
 name = "ram-sentinel"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
+description = "The Surgical Memory Guardian for Linux Desktops"
+license = "MIT"
+repository = "https://github.com/benedictjohannes/ram-sentinel"
 
 [dependencies]
 byte-unit = "5.2.0"
