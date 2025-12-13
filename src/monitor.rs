@@ -17,10 +17,13 @@ pub enum MonitorStatus {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)] // this gets printed in logs
+// Kill reasons, ordered by urgency. 
+// Actual priority determined by check order in `Monitor::check()`.
 pub enum KillReason {
-    PsiPressure(f32, u64), // Pressure, Bytes to free
-    LowMemory(u64), // Bytes available
-    LowSwap(u64), // Bytes free
+    LowMemory(u64),        // Priority 1
+    LowSwap(u64),          // Priority 2
+    PsiPressure(f32, u64), // Priority 3
 }
 
 impl Monitor {
