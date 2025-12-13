@@ -122,8 +122,8 @@ impl Config {
         config.validate(path_loaded.as_deref());
 
         // Optimization: Compile Regex patterns
-        let ignore_names_regex = compile_patterns(&config.ignore_names);
-        let kill_targets_regex = compile_patterns(&config.kill_targets);
+        let ignore_names_regex = compile_patterns(&config.ignore_names, "ignore_names");
+        let kill_targets_regex = compile_patterns(&config.kill_targets, "kill_targets");
 
         RuntimeContext {
             config,
@@ -252,15 +252,19 @@ impl Config {
     }
 }
 
-fn compile_patterns(raw: &[String]) -> Vec<Pattern> {
-    raw.iter().map(|s| {
+fn compile_patterns(raw: &[String], field_name: &str) -> Vec<Pattern> {
+    raw.iter().enumerate().map(|(i, s)| {
         if s.starts_with('/') && s.ends_with('/') && s.len() > 2 {
             let regex_str = &s[1..s.len()-1];
             match Regex::new(regex_str) {
                 Ok(re) => Pattern::Regex(re),
                 Err(e) => {
-                    eprintln!("Warning: Invalid regex '{}': {}", s, e);
-                    Pattern::Literal(s.clone())
+                    // Exit Code 9: Invalid regex pattern
+                    eprintln!(
+                        "Error: Invalid regex in {}: entry {} ('{}'): {}",
+                        field_name, i, s, e
+                    );
+                    exit(9);
                 }
             }
         } else {
