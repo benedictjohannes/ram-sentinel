@@ -1,0 +1,67 @@
+name: Release & Publish
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.*"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test_and_build:
+    name: Test & Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest]
+        toolchain: [stable]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install system dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      - name: Check Cargo.lock consistency
+        run: cargo check --frozen
+
+      - name: Build release binary
+        run: cargo build --verbose --release
+
+      - name: Archive artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ram-sentinel-${{ matrix.os }}
+          path: target/release/ram-sentinel*
+
+  publish_to_crates_io:
+    name: Publish to Crates.io
+    needs: [test_and_build]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: stable
+
+      - name: Publish to Crates.io
+        uses: actions-rs/cargo@v1
+        with:
+          command: publish
+          args: --no-verify
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
