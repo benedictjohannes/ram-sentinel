@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use crate::config::{RuntimeContext, KillStrategy};
 use sysinfo::{System, RefreshKind, ProcessRefreshKind, ProcessesToUpdate};
 use nix::sys::signal::{kill, Signal};
@@ -115,20 +116,27 @@ impl Killer {
             })
             .map(|(pid, process)| {
                 let name = process.name().to_string_lossy();
-                let cmd_line = process.cmd().iter()
-                        .map(|s| s.to_string_lossy())
-                        .collect::<Vec<_>>()
-                        .join(" ");
-
-                // 1. Calculate Match Priority (KillTargetMatch)
-                // We search for the *first* match in kill_targets to determine priority.
-                // 0 = Highest Priority. usize::MAX = No Match (General Population).
                 let mut match_index = usize::MAX;
-                
+
                 for (idx, pat) in ctx.kill_targets_regex.iter().enumerate() {
-                    if pat.matches(&name) || pat.matches(&cmd_line) {
+                    if pat.matches(&name) {
                         match_index = idx;
                         break;
+                    }
+                }
+
+                // Only construct expensive cmdline if name didn't match
+                if match_index == usize::MAX && !ctx.kill_targets_regex.is_empty() {
+                    let cmd_line = process.cmd().iter()
+                        .map(|s| s.to_string_lossy())
+                        .collect::<Vec<Cow<str>>>()
+                        .join(" ");
+                    
+                    for (idx, pat) in ctx.kill_targets_regex.iter().enumerate() {
+                        if pat.matches(&cmd_line) {
+                            match_index = idx;
+                            break;
+                        }
                     }
                 }
 
