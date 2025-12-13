@@ -116,7 +116,7 @@ impl Killer {
                 }
 
                 // 2. Calculate Kill Score
-                let score = match ctx.config.kill_strategy {
+                let score = match ctx.kill_strategy {
                     KillStrategy::LargestRss => process.memory(),
                     KillStrategy::HighestOomScore => get_oom_score(*pid) as u64,
                 };
@@ -153,7 +153,7 @@ impl Killer {
             return false;
         }
 
-        thread::sleep(Duration::from_millis(ctx.config.sigterm_wait_ms));
+        thread::sleep(Duration::from_millis(ctx.sigterm_wait_ms));
 
         // Refill process list specifically to check this PID
         self.system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);

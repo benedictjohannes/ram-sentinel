@@ -1,4 +1,4 @@
-use crate::{config::{MemoryConfig, RuntimeContext}, psi::read_psi_total, utils::parse_size};
+use crate::{config::{MemoryConfigParsed, RuntimeContext}, psi::read_psi_total};
 use sysinfo::{System, RefreshKind, MemoryRefreshKind};
 use std::time::Instant;
 use byte_unit::Byte;
@@ -46,13 +46,13 @@ impl Monitor {
         // Check if we are in "Warn Reset" cooldown
         let now = Instant::now();
         if let Some(last) = self.last_warn_time {
-            if (now.duration_since(last).as_millis() as u64) < ctx.config.warn_reset_ms {
+            if (now.duration_since(last).as_millis() as u64) < ctx.warn_reset_ms {
                 // Cooldown active
             }
         }
 
         // 1. PSI Check
-        if let Some(psi_config) = &ctx.config.psi {
+        if let Some(psi_config) = &ctx.psi {
             let (current_total, current_time) = Self::read_psi();
             // Calculate pressure
             let time_delta_us = current_time.duration_since(self.last_psi_time).as_micros() as f64;
@@ -70,7 +70,7 @@ impl Monitor {
 
             if let Some(kill_max) = psi_config.kill_max_percent {
                 if pressure as f32 > kill_max {
-                    let amount = parse_size(psi_config.amount_to_free.as_ref().unwrap());
+                    let amount = psi_config.amount_to_free.unwrap_or(0);
                     return MonitorStatus::Kill(KillReason::PsiPressure(pressure as f32, amount));
                 }
             }
@@ -84,7 +84,7 @@ impl Monitor {
         }
 
         // 2. RAM Check
-        if let Some(ram_config) = &ctx.config.ram {
+        if let Some(ram_config) = &ctx.ram {
             let available = self.system.available_memory();
             let total = self.system.total_memory();
             let percent_free = (available as f64 / total as f64) * 100.0;
@@ -100,7 +100,7 @@ impl Monitor {
         }
 
         // 3. Swap Check
-        if let Some(swap_config) = &ctx.config.swap {
+        if let Some(swap_config) = &ctx.swap {
             let free = self.system.free_swap();
             let total = self.system.total_swap();
             // Avoid division by zero if no swap
@@ -123,7 +123,7 @@ impl Monitor {
 
     fn can_warn(&self, ctx: &RuntimeContext) -> bool {
         match self.last_warn_time {
-            Some(last) => (Instant::now().duration_since(last).as_millis() as u64) >= ctx.config.warn_reset_ms,
+            Some(last) => (Instant::now().duration_since(last).as_millis() as u64) >= ctx.warn_reset_ms,
             None => true,
         }
     }
@@ -140,9 +140,8 @@ impl Monitor {
     }
 }
 
-fn should_kill(config: &MemoryConfig, free_bytes: u64, free_percent: f32) -> bool {
-    if let Some(limit_bytes) = &config.kill_min_free_bytes {
-        let limit = parse_size(limit_bytes);
+fn should_kill(config: &MemoryConfigParsed, free_bytes: u64, free_percent: f32) -> bool {
+    if let Some(limit) = config.kill_min_free_bytes {
         if free_bytes < limit { return true; }
     }
     if let Some(limit_percent) = config.kill_min_free_percent {
@@ -151,9 +150,8 @@ fn should_kill(config: &MemoryConfig, free_bytes: u64, free_percent: f32) -> boo
     false
 }
 
-fn should_warn(config: &MemoryConfig, free_bytes: u64, free_percent: f32) -> bool {
-    if let Some(limit_bytes) = &config.warn_min_free_bytes {
-        let limit = parse_size(limit_bytes);
+fn should_warn(config: &MemoryConfigParsed, free_bytes: u64, free_percent: f32) -> bool {
+    if let Some(limit) = config.warn_min_free_bytes {
         if free_bytes < limit { return true; }
         return false; 
     }

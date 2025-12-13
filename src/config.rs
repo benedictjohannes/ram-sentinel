@@ -44,6 +44,24 @@ pub struct MemoryConfig {
     pub kill_min_free_bytes: Option<String>,
     pub kill_min_free_percent: Option<f32>,
 }
+#[derive(Debug, Clone)]
+pub struct MemoryConfigParsed {
+    pub warn_min_free_bytes: Option<u64>,
+    pub warn_min_free_percent: Option<f32>,
+    pub kill_min_free_bytes: Option<u64>,
+    pub kill_min_free_percent: Option<f32>,
+}
+
+impl MemoryConfigParsed {
+    pub fn from_config(config: MemoryConfig) -> Self {
+        Self {
+            warn_min_free_bytes: config.warn_min_free_bytes.as_ref().map(|s| parse_size(s)),
+            warn_min_free_percent: config.warn_min_free_percent,
+            kill_min_free_bytes: config.kill_min_free_bytes.as_ref().map(|s| parse_size(s)),
+            kill_min_free_percent: config.kill_min_free_percent,
+        }
+    }
+}
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -73,8 +91,18 @@ fn default_kill_targets() -> Vec<String> {
     ]
 }
 
+#[derive(Debug)]
 pub struct RuntimeContext {
-    pub config: Config,
+    pub psi: Option<psi::PsiConfigParsed>,
+    pub ram: Option<MemoryConfigParsed>,
+    pub swap: Option<MemoryConfigParsed>,
+
+    pub check_interval_ms: u64,
+    pub warn_reset_ms: u64,
+    pub sigterm_wait_ms: u64,
+
+    pub kill_strategy: KillStrategy,
+
     pub ignore_names_regex: Vec<Pattern>,
     pub kill_targets_regex: Vec<Pattern>,
 }
@@ -115,7 +143,13 @@ impl Config {
         let kill_targets_regex = compile_patterns(&config.kill_targets, "kill_targets");
 
         RuntimeContext {
-            config,
+            psi: config.psi.map(psi::PsiConfigParsed::from_config),
+            ram: config.ram.map(MemoryConfigParsed::from_config),
+            swap: config.swap.map(MemoryConfigParsed::from_config),
+            check_interval_ms: config.check_interval_ms,
+            warn_reset_ms: config.warn_reset_ms,
+            sigterm_wait_ms: config.sigterm_wait_ms,
+            kill_strategy: config.kill_strategy,
             ignore_names_regex,
             kill_targets_regex,
         }

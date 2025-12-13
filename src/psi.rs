@@ -4,6 +4,7 @@ use std::fmt;
 use std::fs;
 use std::io;
 use std::num::ParseIntError;
+use crate::utils::parse_size;
 
 #[derive(Debug)]
 pub enum PsiError {
@@ -70,8 +71,23 @@ impl PsiConfig {
         self.warn_max_percent.is_none() && self.kill_max_percent.is_none()
     }
 }
+#[derive(Debug, Clone)]
 pub struct PsiConfigParsed {
     pub warn_max_percent: Option<f32>,
     pub kill_max_percent: Option<f32>,
     pub amount_to_free: Option<u64>,
+}
+
+impl PsiConfigParsed {
+    pub fn from_config(config: PsiConfig) -> Self {
+        let amount_to_free = config.amount_to_free
+            .as_ref()
+            .map(|s| parse_size(s));
+
+        Self {
+            warn_max_percent: config.warn_max_percent,
+            kill_max_percent: config.kill_max_percent,
+            amount_to_free,
+        }
+    }
 }

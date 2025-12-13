@@ -1,7 +1,9 @@
 mod config;
 mod killer;
 mod monitor;
+mod psi;
 mod system;
+mod utils;
 
 use clap::Parser;
 use env_logger::Env;
@@ -14,11 +16,10 @@ use std::process::exit;
 use std::thread::sleep;
 use std::time::Duration;
 
-use crate::config::{Config, MemoryConfig, RuntimeContext};
+use crate::config::{Config, MemoryConfigParsed, RuntimeContext};
 use crate::killer::Killer;
 use crate::monitor::{KillReason, Monitor, MonitorStatus};
 use crate::system::get_systemd_unit;
-use byte_unit::Byte;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -70,7 +71,7 @@ fn run_loop(ctx: RuntimeContext, no_kill: bool) {
 
     info!(
         "ram-sentinel started. Interval: {}ms",
-        ctx.config.check_interval_ms
+        ctx.check_interval_ms
     );
 
     loop {
@@ -92,14 +93,14 @@ fn run_loop(ctx: RuntimeContext, no_kill: bool) {
                     let amount_needed = match reason {
                         KillReason::PsiPressure(_, amount) => Some(amount),
                         KillReason::LowMemory(available) => {
-                            if let Some(config) = &ctx.config.ram {
+                            if let Some(config) = &ctx.ram {
                                 calc_needed(config, available, monitor.get_system().total_memory())
                             } else {
                                 None
                             }
                         }
                         KillReason::LowSwap(free) => {
-                            if let Some(config) = &ctx.config.swap {
+                            if let Some(config) = &ctx.swap {
                                 calc_needed(config, free, monitor.get_system().total_swap())
                             } else {
                                 None
@@ -112,17 +113,15 @@ fn run_loop(ctx: RuntimeContext, no_kill: bool) {
             }
         }
 
-        sleep(Duration::from_millis(ctx.config.check_interval_ms));
+        sleep(Duration::from_millis(ctx.check_interval_ms));
     }
 }
 
-fn calc_needed(config: &MemoryConfig, current_free: u64, total: u64) -> Option<u64> {
+fn calc_needed(config: &MemoryConfigParsed, current_free: u64, total: u64) -> Option<u64> {
     let mut target = 0;
 
-    if let Some(bytes_str) = &config.kill_min_free_bytes {
-        if let Ok(bytes) = Byte::parse_str(bytes_str, true) {
-            target = bytes.as_u64();
-        }
+    if let Some(bytes) = config.kill_min_free_bytes {
+        target = bytes;
     } else if let Some(percent) = config.kill_min_free_percent {
         target = (total as f64 * (percent as f64 / 100.0)) as u64;
     }
