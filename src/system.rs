@@ -23,9 +23,10 @@ Type=simple
 {}
 Restart=on-failure
 RestartSec=5s
-# Runs with highest priority, adjust this if you see errors in journalctl logs.
-Nice=-10
-OOMScoreAdjust=-1000
+# Unprivileged users cannot usually set negative Nice/OOMScore to run with highest priority.
+# To properly use these settings, check /etc/security/limits.conf and journalctl logs.
+# Nice=-10
+# OOMScoreAdjust=-1000
 
 [Install]
 WantedBy=default.target
