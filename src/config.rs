@@ -138,6 +138,7 @@ pub struct RuntimeContext {
 pub enum Pattern {
     Literal(String),
     Regex(Regex),
+    StartsWith(String),
 }
 
 impl Pattern {
@@ -145,6 +146,7 @@ impl Pattern {
         match self {
             Pattern::Literal(lit) => s.contains(lit),
             Pattern::Regex(re) => re.is_match(s),
+            Pattern::StartsWith(prefix) => s.starts_with(prefix),
         }
     }
 }
@@ -295,11 +297,11 @@ impl Config {
 fn compile_patterns(raw: &[String], field_name: &str) -> Vec<Pattern> {
     raw.iter().enumerate().map(|(i, s)| {
         if s.starts_with('/') && s.ends_with('/') && s.len() > 2 {
+            // Case 1: Regex e.g., "/firefox/"
             let regex_str = &s[1..s.len()-1];
             match Regex::new(regex_str) {
                 Ok(re) => Pattern::Regex(re),
                 Err(e) => {
-                    // Exit Code 9: Invalid regex pattern
                     eprintln!(
                         "Error: Invalid regex in {}: entry {} ('{}'): {}",
                         field_name, i, s, e
@@ -307,9 +309,13 @@ fn compile_patterns(raw: &[String], field_name: &str) -> Vec<Pattern> {
                     exit(9);
                 }
             }
+        } else if s.starts_with('^') && s.len() > 1 {
+            // Case 2: StartsWith e.g., "^/usr/bin/node"
+            // We strip the leading '^' and store the rest
+            Pattern::StartsWith(s[1..].to_string())
         } else {
+            // Case 3: Literal (Substring) e.g., "renderer"
             Pattern::Literal(s.clone())
         }
     }).collect()
 }
-
