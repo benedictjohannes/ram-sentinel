@@ -69,7 +69,10 @@ impl Killer {
                              break;
                          }
                     } else {
-                        error!("Failed to kill victim. Aborting sequence.");
+                        error!("Failed to kill victim PID {} {}. Aborting sequence.", candidate.pid, victim_name);
+                        send_notification("Kill Failure", 
+                        &format!("Failed to terminate process '{}' (PID {})", victim_name, candidate.pid), 
+                        "dialog-error");
                         break;
                     }
                 } else {
@@ -163,6 +166,10 @@ impl Killer {
         
         info!("Sending SIGTERM to process '{}' (PID: {})", name, pid);
         if let Err(e) = kill(nix_pid, Signal::SIGTERM) {
+            if e == nix::errno::Errno::ESRCH {
+                info!("Process {} already gone (ESRCH) during SIGTERM.", pid);
+                return true;
+            }
             error!("Failed to send SIGTERM to {}: {}", pid, e);
             return false;
         }
@@ -182,6 +189,7 @@ impl Killer {
         // Check if PID reused (safety)
         if let Some(process) = self.system.process(pid) {
             if process.start_time() != create_time {
+                 send_notification("System Load Shedding", &format!("Terminated process '{}' (PID {}) to prevent system freeze.", name, pid), "process-stop");
                  info!("Process {} terminated (PID reused).", pid);
                  return true;
             }
