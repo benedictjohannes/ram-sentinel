@@ -123,11 +123,19 @@ impl PsiConfigParsed {
             None
         };
 
+        let check_interval_ms = config.check_interval_ms.unwrap_or(global_interval * 10);
+
+        if check_interval_ms < 100 || check_interval_ms > 300000 {
+            return Err(PsiError::ValidationError(
+                format!("PSI check_interval_ms must be between 100 and 300000, got {}", check_interval_ms)
+            ));
+        }
+
         Ok(Self {
             warn_max_percent: config.warn_max_percent,
             kill_max_percent: config.kill_max_percent,
             amount_to_free: amount_to_free,
-            check_interval_ms: config.check_interval_ms.unwrap_or(global_interval * 10),
+            check_interval_ms,
         })
     }
 }
