@@ -69,6 +69,7 @@ pub struct PsiConfig {
     pub warn_max_percent: Option<f32>,
     pub kill_max_percent: Option<f32>,
     pub amount_to_free: Option<String>,
+    pub check_interval_ms: Option<u64>,
 }
 impl PsiConfig {
     pub fn is_effectively_empty(&self) -> bool {
@@ -80,10 +81,19 @@ pub struct PsiConfigParsed {
     pub warn_max_percent: Option<f32>,
     pub kill_max_percent: Option<f32>,
     pub amount_to_free: Option<u64>,
+    pub check_interval_ms: u64,
 }
 
 impl PsiConfigParsed {
-    pub fn try_from_config(config: PsiConfig) -> Result<Self, PsiError> {
+    pub fn try_from_config(config: PsiConfig, global_interval: u64) -> Result<Self, PsiError> {
+        if let Some(warn) = config.warn_max_percent {
+            if warn < 0.0 || warn > 100.0 {
+                return Err(PsiError::ValidationError(
+                    format!("PSI warn_max_percent must be between 0-100, got {}", warn)
+                ));
+            }
+        }
+
         if config.kill_max_percent.is_some() && config.amount_to_free.is_none() {
             return Err(PsiError::ValidationError("PSI kill_max_percent set but amount_to_free is missing.".to_string()));
         }
@@ -96,6 +106,11 @@ impl PsiConfigParsed {
             if parsed_amt == 0 {
                 return Err(PsiError::ValidationError("PSI amount_to_free is illegal (parses to 0).".to_string()));
             }
+
+            let total_ram = crate::utils::get_total_memory();
+            if parsed_amt > (total_ram / 2) {
+                 return Err(PsiError::ValidationError(format!("PSI amount_to_free ({}) exceeds 50% of total RAM ({}).", parsed_amt, total_ram)));
+            }
             Some(parsed_amt)
         } else {
             None
@@ -105,10 +120,12 @@ impl PsiConfigParsed {
             warn_max_percent: config.warn_max_percent,
             kill_max_percent: config.kill_max_percent,
             amount_to_free: amount_to_free,
+            check_interval_ms: config.check_interval_ms.unwrap_or(global_interval * 10),
         })
     }
 }
 
 pub fn validate_psi_availability() -> Result<(), PsiError> {
-    read_psi_total().map(|_| ()) // Just check if it can be read, discard value
+    read_psi_total()?;
+    Ok(())
 }

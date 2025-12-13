@@ -7,8 +7,7 @@ pub fn get_systemd_unit() -> String {
     let exec_start_path = match path_result {
         Ok(path_buf) => path_buf.to_string_lossy().into_owned(),
         Err(_e) => {
-            let fallback_path: &str =
-                "/usr/local/bin/ram-sentinel # Ensure ensure this path is correct";
+            let fallback_path = "/usr/local/bin/ram-sentinel # Ensure this path is correct";
             fallback_path.to_owned()
         }
     };
@@ -23,11 +22,12 @@ Type=simple
 {}
 Restart=on-failure
 RestartSec=5s
+# Runs with highest priority, adjust this if you see errors in journalctl logs.
 Nice=-10
 OOMScoreAdjust=-1000
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 "#,
         format!("ExecStart={}", exec_start_path),
     );

@@ -2,7 +2,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::exit;
-use directories::ProjectDirs;
 use regex::Regex;
 use log::info;
 use crate::psi;
@@ -138,26 +137,26 @@ impl Pattern {
 
 impl Config {
     pub fn load(cli_config_path: Option<PathBuf>) -> RuntimeContext {
-        let (config, path_loaded) = match cli_config_path {
+        let config = match cli_config_path {
             Some(path) => {
                 if !path.exists() {
                     // Exit code 2: Error reading config file
                     eprintln!("Error: Config file specified but not found: {:?}", path);
                     exit(2);
                 }
-                (Self::parse_file(&path), Some(path))
+                Self::parse_file(&path)
             }
             None => Self::find_and_load_config(),
         };
 
-        config.validate(path_loaded.as_deref());
+        config.validate();
 
         // Optimization: Compile Regex patterns
         let ignore_names_regex = compile_patterns(&config.ignore_names, "ignore_names");
         let kill_targets_regex = compile_patterns(&config.kill_targets, "kill_targets");
 
         let psi_parsed = if let Some(p) = config.psi {
-            let parsed = psi::PsiConfigParsed::try_from_config(p).unwrap_or_else(|e| {
+            let parsed = psi::PsiConfigParsed::try_from_config(p, config.check_interval_ms).unwrap_or_else(|e| {
                 eprintln!("Error: {}", e);
                 exit(7);
             });
@@ -185,31 +184,19 @@ impl Config {
         }
     }
 
-    fn find_and_load_config() -> (Config, Option<PathBuf>) {
-        if let Some(proj_dirs) = ProjectDirs::from("", "", "ram-sentinel") {
-            let config_dir = proj_dirs.config_dir();
-            let extensions = ["yaml", "yml", "json", "toml"];
-            
-            for ext in &extensions {
-                let path = config_dir.join(format!("config.{}", ext));
-                if path.exists() {
-                    return (Self::parse_file(&path), Some(path));
-                }
-            }
-        }
-        
+    fn find_and_load_config() -> Config {
         if let Some(config_home) = directories::BaseDirs::new().map(|b| b.config_dir().to_path_buf()) {
              let extensions = ["yaml", "yml", "json", "toml"];
              for ext in &extensions {
                 let path = config_home.join(format!("ram-sentinel.{}", ext));
                 if path.exists() {
-                     return (Self::parse_file(&path), Some(path));
+                     return Self::parse_file(&path);
                 }
              }
         }
 
         info!("No configuration file found. Loading sane defaults.");
-        (Self::sane_defaults(), None)
+        Self::sane_defaults()
     }
 
     fn parse_file(path: &Path) -> Config {
@@ -245,6 +232,7 @@ impl Config {
                 warn_max_percent: None,
                 kill_max_percent: None,
                 amount_to_free: None,
+                check_interval_ms: None,
             }),
             ram: Some(MemoryConfig {
                 warn_min_free_bytes: None,
@@ -267,7 +255,7 @@ impl Config {
         }
     }
 
-    fn validate(&self, _path: Option<&Path>) {
+    fn validate(&self) {
         let psi_empty = self.psi.as_ref().map_or(true, |p| p.is_effectively_empty());
         let ram_empty = self.ram.as_ref().map_or(true, |r| r.is_effectively_empty());
         let swap_empty = self.swap.as_ref().map_or(true, |s| s.is_effectively_empty());
@@ -284,7 +272,7 @@ impl Config {
             exit(5);
         }
         // Exit Code 6: Interval too low
-        if self.check_interval_ms <= 100 {
+        if self.check_interval_ms < 100 {
             eprintln!("Error: check_interval_ms < 100.");
             exit(6);
         }

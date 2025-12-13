@@ -30,49 +30,52 @@ impl Monitor {
         );
         system.refresh_memory();
         
-        let (total, time) = Self::read_psi().unwrap_or((0, Instant::now()));
+        let total = Self::read_psi().unwrap_or(0);
 
         Self {
             system,
             last_psi_total: total,
-            last_psi_time: time,
+            last_psi_time: Instant::now(),
             last_warn_time: None,
         }
     }
 
     pub fn check(&mut self, ctx: &RuntimeContext) -> MonitorStatus {
         self.system.refresh_memory();
-        
-        let now = Instant::now();
 
+        let now = Instant::now();
+        
         // 1. PSI Check
         if let Some(psi_config) = &ctx.psi {
-            if let Some((current_total, current_time)) = Self::read_psi() {
-                // Calculate pressure
-                let time_delta_us = current_time.duration_since(self.last_psi_time).as_micros() as f64;
-                let total_delta = (current_total.saturating_sub(self.last_psi_total)) as f64;
-                
-                let pressure = if time_delta_us > 0.0 {
-                    (total_delta / time_delta_us) * 100.0
-                } else {
-                    0.0
-                };
+            // Only check PSI if enough time has passed
+            if now.duration_since(self.last_psi_time).as_millis() as u64 >= psi_config.check_interval_ms {
+                if let Some(current_total) = Self::read_psi() {
+                    // Calculate pressure
+                    let time_delta_us = now.duration_since(self.last_psi_time).as_micros() as f64;
+                    let total_delta = (current_total.saturating_sub(self.last_psi_total)) as f64;
+                    
+                    let pressure = if time_delta_us > 0.0 {
+                        (total_delta / time_delta_us) * 100.0
+                    } else {
+                        0.0
+                    };
 
-                // Update state
-                self.last_psi_total = current_total;
-                self.last_psi_time = current_time;
+                    // Update state
+                    self.last_psi_total = current_total;
+                    self.last_psi_time = now;
 
-                if let Some(kill_max) = psi_config.kill_max_percent {
-                    if pressure as f32 > kill_max {
-                        let amount = psi_config.amount_to_free.unwrap_or(0);
-                        return MonitorStatus::Kill(KillReason::PsiPressure(pressure as f32, amount));
+                    if let Some(kill_max) = psi_config.kill_max_percent {
+                        if pressure as f32 > kill_max {
+                            let amount = psi_config.amount_to_free.unwrap_or(0);
+                            return MonitorStatus::Kill(KillReason::PsiPressure(pressure as f32, amount));
+                        }
                     }
-                }
 
-                if let Some(warn_max) = psi_config.warn_max_percent {
-                    if pressure as f32 > warn_max && self.can_warn(ctx) {
-                        self.last_warn_time = Some(now);
-                        return MonitorStatus::Warn(format!("Memory pressure reached {:.1}%", pressure));
+                    if let Some(warn_max) = psi_config.warn_max_percent {
+                        if pressure as f32 > warn_max && self.can_warn(ctx) {
+                            self.last_warn_time = Some(now);
+                            return MonitorStatus::Warn(format!("Memory pressure reached {:.2}%", pressure));
+                        }
                     }
                 }
             }
@@ -90,7 +93,7 @@ impl Monitor {
 
             if should_warn(ram_config, available, percent_free as f32) && self.can_warn(ctx) {
                 self.last_warn_time = Some(now);
-                return MonitorStatus::Warn(format!("Low RAM: {:.2} ({:.2}%) free", Byte::from_u64(available).get_appropriate_unit(byte_unit::UnitType::Decimal), percent_free));
+                return MonitorStatus::Warn(format!("Low RAM: {:.2} ({:.2}%) available", Byte::from_u64(available).get_appropriate_unit(byte_unit::UnitType::Decimal), percent_free));
             }
         }
 
@@ -108,7 +111,7 @@ impl Monitor {
 
                 if should_warn(swap_config, free, percent_free as f32) && self.can_warn(ctx) {
                     self.last_warn_time = Some(now);
-                    return MonitorStatus::Warn(format!("Low Swap: {:.2} ({:.2}%) free", Byte::from_u64(free).get_appropriate_unit(byte_unit::UnitType::Decimal), percent_free));
+                    return MonitorStatus::Warn(format!("Low Swap: {:.2} ({:.2}%) available", Byte::from_u64(free).get_appropriate_unit(byte_unit::UnitType::Decimal), percent_free));
                 }
             }
         }
@@ -123,11 +126,8 @@ impl Monitor {
         }
     }
 
-    fn read_psi() -> Option<(u64, Instant)> {
-        if let Ok(val) = read_psi_total() {
-            return Some((val, Instant::now()));
-        }
-        None
+    fn read_psi() -> Option<u64> {
+        read_psi_total().ok()
     }
     
     pub fn get_system(&self) -> &System {
@@ -138,6 +138,7 @@ impl Monitor {
 fn should_kill(config: &MemoryConfigParsed, free_bytes: u64, free_percent: f32) -> bool {
     if let Some(limit) = config.kill_min_free_bytes {
         if free_bytes < limit { return true; }
+        return false;
     }
     if let Some(limit_percent) = config.kill_min_free_percent {
         if free_percent < limit_percent { return true; }
