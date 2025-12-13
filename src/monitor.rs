@@ -1,4 +1,4 @@
-use crate::{config::{MemoryConfig, RuntimeContext}, psi::read_psi_total};
+use crate::{config::{MemoryConfig, RuntimeContext}, psi::read_psi_total, utils::parse_size};
 use sysinfo::{System, RefreshKind, MemoryRefreshKind};
 use std::time::Instant;
 use byte_unit::Byte;
@@ -161,8 +161,4 @@ fn should_warn(config: &MemoryConfig, free_bytes: u64, free_percent: f32) -> boo
         if free_percent < limit_percent { return true; }
     }
     false
-}
-
-fn parse_size(s: &str) -> u64 {
-    Byte::parse_str(s, true).map(|b| b.as_u64()).unwrap_or(0)
 }

@@ -6,6 +6,7 @@ use directories::ProjectDirs;
 use regex::Regex;
 use log::info;
 use crate::psi;
+use crate::utils::parse_size;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -226,23 +227,27 @@ impl Config {
             exit(4);
         }
 
-        // Exit Code 5: PSI logical error
+        // Exit Code 5: Interval too high
+        if self.check_interval_ms > 300000 {
+            eprintln!("Error: check_interval_ms > 300000.");
+            exit(5);
+        }
+        // Exit Code 6: Interval too low
+        if self.check_interval_ms <= 100 {
+            eprintln!("Error: check_interval_ms < 100.");
+            exit(6);
+        }
+        
+        // Exit Code 7: PSI logical error
         if let Some(psi) = &self.psi {
             if psi.kill_max_percent.is_some() && psi.amount_to_free.is_none() {
                 eprintln!("Error: PSI kill_max_percent set but amount_to_free is missing.");
-                exit(5);
+                exit(7);
             }
-        }
-
-        // Exit Code 6: Interval too high
-        if self.check_interval_ms > 300000 {
-            eprintln!("Error: check_interval_ms > 300000.");
-            exit(6);
-        }
-        // Exit Code 7: Interval too low
-        if self.check_interval_ms <= 100 {
-            eprintln!("Error: check_interval_ms < 100.");
-            exit(7);
+            if parse_size(psi.amount_to_free.as_ref().unwrap()) == 0 {
+                eprintln!("Error: PSI amount_to_free is illegal.");
+                exit(7);
+            }
         }
 
         // Exit Code 8: PSI availability
