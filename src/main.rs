@@ -1,4 +1,5 @@
 mod config;
+mod config_error;
 mod killer;
 mod monitor;
 mod psi;
@@ -95,7 +96,13 @@ fn main() {
     }
 
     // Normal startup
-    let ctx = Config::load(args.config);
+    let ctx = match Config::load(args.config) {
+        Ok(c) => c,
+        Err(e) => {
+            error!("{}", e);
+            exit(e.exit_code());
+        }
+    };
 
     run_loop(ctx, args.no_kill);
 }

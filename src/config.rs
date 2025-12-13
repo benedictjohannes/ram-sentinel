@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::exit;
 use regex::Regex;
 use log::info;
 use crate::psi;
 use crate::utils::parse_size;
+use crate::config_error::ConfigError;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -52,41 +52,41 @@ pub struct MemoryConfigParsed {
 }
 
 impl MemoryConfigParsed {
-    pub fn from_config(config: MemoryConfig) -> Self {
-        let warn_min_free_bytes = config.warn_min_free_bytes.as_ref().map(|s| {
-            parse_size(s).unwrap_or_else(|| {
-                eprintln!("Error: Invalid size string in warnMinFreeBytes: '{}'", s);
-                exit(10);
-            })
-        });
+    pub fn try_from_config(config: MemoryConfig) -> Result<Self, ConfigError> {
+        let warn_min_free_bytes = if let Some(s) = config.warn_min_free_bytes.as_ref() {
+            Some(parse_size(s).ok_or_else(|| {
+                ConfigError::InvalidSize("warnMinFreeBytes".to_string(), s.clone())
+            })?)
+        } else {
+            None
+        };
 
-        let kill_min_free_bytes = config.kill_min_free_bytes.as_ref().map(|s| {
-            parse_size(s).unwrap_or_else(|| {
-                eprintln!("Error: Invalid size string in killMinFreeBytes: '{}'", s);
-                exit(10);
-            })
-        });
+        let kill_min_free_bytes = if let Some(s) = config.kill_min_free_bytes.as_ref() {
+             Some(parse_size(s).ok_or_else(|| {
+                ConfigError::InvalidSize("killMinFreeBytes".to_string(), s.clone())
+            })?)
+        } else {
+            None
+        };
 
         if let Some(p) = config.warn_min_free_percent {
             if !(0.0..=100.0).contains(&p) {
-                eprintln!("Error: warnMinFreePercent must be between 0-100, got {}", p);
-                exit(11);
+                return Err(ConfigError::InvalidPercent("warnMinFreePercent".to_string(), p));
             }
         }
 
         if let Some(p) = config.kill_min_free_percent {
             if !(0.0..=100.0).contains(&p) {
-                eprintln!("Error: killMinFreePercent must be between 0-100, got {}", p);
-                exit(11);
+                return Err(ConfigError::InvalidPercent("killMinFreePercent".to_string(), p));
             }
         }
 
-        Self {
+        Ok(Self {
             warn_min_free_bytes,
             warn_min_free_percent: config.warn_min_free_percent,
             kill_min_free_bytes,
             kill_min_free_percent: config.kill_min_free_percent,
-        }
+        })
     }
 }
 
@@ -152,55 +152,62 @@ impl Pattern {
 }
 
 impl Config {
-    pub fn load(cli_config_path: Option<PathBuf>) -> RuntimeContext {
+    pub fn load(cli_config_path: Option<PathBuf>) -> Result<RuntimeContext, ConfigError> {
         let config = match cli_config_path {
             Some(path) => {
                 if !path.exists() {
-                    // Exit code 2: Error reading config file
-                    eprintln!("Error: Config file specified but not found: {:?}", path);
-                    exit(2);
+                     // Was Exit code 2
+                    return Err(ConfigError::ConfigFileNotFound(path));
                 }
-                Self::parse_file(&path)
+                Self::parse_file(&path)?
             }
-            None => Self::find_and_load_config(),
+            None => Self::find_and_load_config()?,
         };
 
-        config.validate();
+        config.validate()?;
 
         // Optimization: Compile Regex patterns
-        let ignore_names_regex = compile_patterns(&config.ignore_names, "ignore_names");
-        let kill_targets_regex = compile_patterns(&config.kill_targets, "kill_targets");
+        let ignore_names_regex = compile_patterns(&config.ignore_names, "ignore_names")?;
+        let kill_targets_regex = compile_patterns(&config.kill_targets, "kill_targets")?;
 
         let psi_parsed = if let Some(p) = config.psi {
-            let parsed = psi::PsiConfigParsed::try_from_config(p, config.check_interval_ms).unwrap_or_else(|e| {
-                eprintln!("Error: {}", e);
-                exit(7);
-            });
+            let parsed = psi::PsiConfigParsed::try_from_config(p, config.check_interval_ms)
+                .map_err(|e| ConfigError::PsiConfig(e.to_string()))?;
 
-            // Exit Code 8: PSI availability
             if let Err(e) = psi::validate_psi_availability() {
-                eprintln!("Error: PSI enabled but /proc/pressure/memory is not valid: {}", e);
-                exit(8);
+                return Err(ConfigError::PsiUnavailable(e.to_string()));
             }
             Some(parsed)
         } else {
             None
         };
 
-        RuntimeContext {
+        let ram_parsed = if let Some(r) = config.ram {
+            Some(MemoryConfigParsed::try_from_config(r)?)
+        } else {
+            None
+        };
+
+        let swap_parsed = if let Some(s) = config.swap {
+             Some(MemoryConfigParsed::try_from_config(s)?)
+        } else {
+            None
+        };
+
+        Ok(RuntimeContext {
             psi: psi_parsed,
-            ram: config.ram.map(MemoryConfigParsed::from_config),
-            swap: config.swap.map(MemoryConfigParsed::from_config),
+            ram: ram_parsed,
+            swap: swap_parsed,
             check_interval_ms: config.check_interval_ms,
             warn_reset_ms: config.warn_reset_ms,
             sigterm_wait_ms: config.sigterm_wait_ms,
             kill_strategy: config.kill_strategy,
             ignore_names_regex,
             kill_targets_regex,
-        }
+        })
     }
 
-    fn find_and_load_config() -> Config {
+    fn find_and_load_config() -> Result<Config, ConfigError> {
         if let Some(config_home) = directories::BaseDirs::new().map(|b| b.config_dir().to_path_buf()) {
              let extensions = ["yaml", "yml", "json", "toml"];
              for ext in &extensions {
@@ -212,33 +219,26 @@ impl Config {
         }
 
         info!("No configuration file found. Loading sane defaults.");
-        Self::sane_defaults()
+        Ok(Self::sane_defaults())
     }
 
-    fn parse_file(path: &Path) -> Config {
-        let content = fs::read_to_string(path).unwrap_or_else(|e| {
-            // Exit code 2: Error reading config file
-            eprintln!("Error reading config file {:?}: {}", path, e);
-            exit(2);
-        });
+    fn parse_file(path: &Path) -> Result<Config, ConfigError> {
+        let content = fs::read_to_string(path)
+            .map_err(|e| ConfigError::FileRead(path.to_path_buf(), e))?;
 
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("yaml");
 
-        macro_rules! parse_err {
-            ($r:expr) => {
-                $r.map_err(|e| {
-                    // Exit code 3: Error parsing config file
-                    eprintln!("Error parsing config file {:?}: {}", path, e);
-                    exit(3);
-                })
+        macro_rules! parse {
+            ($func:expr) => {
+                $func(&content).map_err(|e| ConfigError::FileParse(path.to_path_buf(), e.to_string()))
             };
         }
 
         match ext {
-            "yaml" | "yml" => parse_err!(serde_yaml::from_str(&content)).unwrap(),
-            "json" => parse_err!(serde_json::from_str(&content)).unwrap(),
-            "toml" => parse_err!(toml::from_str(&content)).unwrap(),
-            _ => parse_err!(serde_yaml::from_str(&content)).unwrap(),
+            "yaml" | "yml" => parse!(serde_yaml::from_str),
+            "json" => parse!(serde_json::from_str),
+            "toml" => parse!(toml::from_str),
+            _ => parse!(serde_yaml::from_str),
         }
     }
 
@@ -271,51 +271,51 @@ impl Config {
         }
     }
 
-    fn validate(&self) {
+    fn validate(&self) -> Result<(), ConfigError> {
         let psi_empty = self.psi.as_ref().map_or(true, |p| p.is_effectively_empty());
         let ram_empty = self.ram.as_ref().map_or(true, |r| r.is_effectively_empty());
         let swap_empty = self.swap.as_ref().map_or(true, |s| s.is_effectively_empty());
         
-        // Exit Code 4: Effectively empty
         if psi_empty && ram_empty && swap_empty {
-            eprintln!("Error: Configuration is effectively empty (no metrics enabled).");
-            exit(4);
+            return Err(ConfigError::EffectiveEmpty);
         }
 
-        // Exit Code 5: Interval too high
         if self.check_interval_ms > 300000 {
-            eprintln!("Error: check_interval_ms > 300000.");
-            exit(5);
+            return Err(ConfigError::IntervalTooHigh(self.check_interval_ms));
         }
-        // Exit Code 6: Interval too low
-        if self.check_interval_ms < 100 {
-            eprintln!("Error: check_interval_ms < 100.");
-            exit(6);
-        }
-    }}
 
-fn compile_patterns(raw: &[String], field_name: &str) -> Vec<Pattern> {
-    raw.iter().enumerate().map(|(i, s)| {
+        if self.check_interval_ms < 100 {
+             return Err(ConfigError::IntervalTooLow(self.check_interval_ms));
+        }
+        
+        Ok(())
+    }
+}
+
+fn compile_patterns(raw: &[String], field_name: &str) -> Result<Vec<Pattern>, ConfigError> {
+    let mut patterns = Vec::new();
+    for (i, s) in raw.iter().enumerate() {
         if s.starts_with('/') && s.ends_with('/') && s.len() > 2 {
-            // Case 1: Regex e.g., "/firefox/"
+            // Case 1: Regex
             let regex_str = &s[1..s.len()-1];
             match Regex::new(regex_str) {
-                Ok(re) => Pattern::Regex(re),
+                Ok(re) => patterns.push(Pattern::Regex(re)),
                 Err(e) => {
-                    eprintln!(
-                        "Error: Invalid regex in {}: entry {} ('{}'): {}",
-                        field_name, i, s, e
-                    );
-                    exit(9);
+                    return Err(ConfigError::RegexError(
+                        field_name.to_string(), 
+                        i, 
+                        s.clone(), 
+                        e.to_string()
+                    ));
                 }
             }
         } else if s.starts_with('^') && s.len() > 1 {
-            // Case 2: StartsWith e.g., "^/usr/bin/node"
-            // We strip the leading '^' and store the rest
-            Pattern::StartsWith(s[1..].to_string())
+            // Case 2: StartsWith
+            patterns.push(Pattern::StartsWith(s[1..].to_string()));
         } else {
-            // Case 3: Literal (Substring) e.g., "renderer"
-            Pattern::Literal(s.clone())
+            // Case 3: Literal
+            patterns.push(Pattern::Literal(s.clone()));
         }
-    }).collect()
+    }
+    Ok(patterns)
 }
