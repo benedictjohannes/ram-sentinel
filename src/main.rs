@@ -33,15 +33,19 @@ extern "C" fn handle_shutdown_signal(_: i32) {
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    #[arg(long, value_name = "FILE")]
+    /// Optional Path to configuration file
+    #[arg(long, short = 'c', value_name = "FILE")]
     config: Option<PathBuf>,
 
+    /// Run in "Dry Run" mode. Monitors memory but does not kill any processes.
     #[arg(long)]
     no_kill: bool,
 
+    /// Optional Path to print configuration to. Defaults to stdout.
     #[arg(long, value_name = "FILE", num_args(0..=1), default_missing_value = "-")]
     print_config: Option<PathBuf>,
 
+    /// Optional Path to print systemd user unit to. Defaults to stdout.
     #[arg(long, value_name = "FILE", num_args(0..=1), default_missing_value = "-")]
     print_systemd_user_unit: Option<PathBuf>,
 }
