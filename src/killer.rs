@@ -1,227 +1,435 @@
-use std::borrow::Cow;
-use crate::config::{RuntimeContext, KillStrategy};
-use sysinfo::{System, RefreshKind, ProcessRefreshKind, ProcessesToUpdate};
-use nix::sys::signal::{kill, Signal};
-use nix::unistd::{Pid as NixPid, Uid};
+use crate::config::{KillStrategy, RuntimeContext};
+use log::{error, info, warn};
+use nix::sys::signal::{Signal, kill};
+use nix::unistd::{Pid as NixPid, SysconfVar, Uid, sysconf};
+use notify_rust::Notification;
+use std::fmt::Write; // For writing to path_buffer
+use std::fs::{self, File};
+use std::io::Read;
 use std::thread;
 use std::time::Duration;
-use std::fs;
-use std::cmp::Ordering;
-use log::{info, warn, error};
-use notify_rust::Notification;
 
 pub struct Killer {
-    system: System,
+    // Buffers for zero-allocation logic
+    read_buffer: Vec<u8>,
+    path_buffer: String,
+    page_size: u64,
 }
 
-// Internal struct to handle the ranking logic (Process + KillScore + MatchPriority)
-struct KillCandidate {
-    pid: sysinfo::Pid,
-    score: u64,           // RSS (bytes) or OOM Score (normalized to u64)
-    match_index: usize,   // 0..N for explicit targets, usize::MAX for non-matches
+#[derive(Debug, Clone)]
+struct Champion {
+    pid: u32,
+    score: u64,         // Sorting metric (RSS or OOM Score)
+    rss: u64,           // Actual memory usage in bytes
+    match_index: usize, // 0..N for explicit targets, usize::MAX for non-matches
+    start_time: u64,    // From /proc/[pid]/stat (for safety check)
 }
 
 impl Killer {
     pub fn new() -> Self {
+        // Query system page size (default to 4096 if fails)
+        let page_size = match sysconf(SysconfVar::PAGE_SIZE) {
+            Ok(Some(val)) => val as u64,
+            _ => 4096,
+        };
+
         Self {
-            system: System::new_with_specifics(
-                RefreshKind::nothing().with_processes(ProcessRefreshKind::everything())
-            ),
+            // Pre-allocate AND initialize to ensure pages are physically backed (prevent page faults during OOM)
+            read_buffer: vec![0u8; 256 * 1024],
+            path_buffer: String::with_capacity(256),
+            page_size,
         }
     }
 
-    pub fn kill_sequence(&mut self, ctx: &RuntimeContext, reason_desc: &str, mut amount_needed: Option<u64>) {
-        info!("Initiating Kill Sequence. Reason: {}. Needed: {:?}", reason_desc, amount_needed);
-        
+    pub fn kill_sequence(
+        &mut self,
+        ctx: &RuntimeContext,
+        reason_desc: &str,
+        mut amount_needed: Option<u64>,
+    ) {
+        info!(
+            "Initiating Kill Sequence. Reason: {}. Needed: {:?}",
+            reason_desc, amount_needed
+        );
+
         loop {
-            // 1. Refresh World State
-            self.system.refresh_processes(ProcessesToUpdate::All, true);
-            
-            // 2. Get Candidates (Sorted by Priority -> Score)
-            let candidates = self.get_ranked_candidates(ctx);
-            
-            if candidates.is_empty() {
+            // 1. Scan /proc and find the best candidate ("The Champion")
+            let champion_opt = self.find_champion(ctx);
+
+            if let Some(champion) = champion_opt {
+                // Fetch name for logging (on-demand, after scan loop)
+                let name = self
+                    .get_process_name(champion.pid)
+                    .unwrap_or_else(|| "unknown".to_string());
+
+                info!(
+                    "Selected victim: {} (PID: {}). Score: {}. RSS: {}. MatchPriority: {}",
+                    name,
+                    champion.pid,
+                    champion.score,
+                    champion.rss,
+                    if champion.match_index == usize::MAX {
+                        "None".to_string()
+                    } else {
+                        champion.match_index.to_string()
+                    }
+                );
+
+                // 2. Kill Logic
+                match self.kill_process(ctx, &champion, &name) {
+                    Some(freed_bytes) => {
+                        if let Some(needed) = amount_needed {
+                            if freed_bytes >= needed {
+                                info!(
+                                    "Freed approx {} bytes (needed {}). Stopping sequence.",
+                                    freed_bytes, needed
+                                );
+                                break;
+                            } else {
+                                amount_needed = Some(needed - freed_bytes);
+                                info!(
+                                    "Freed {} bytes. Still need {}. Continuing...",
+                                    freed_bytes,
+                                    amount_needed.unwrap()
+                                );
+                            }
+                        } else {
+                            // If no specific amount was requested, stop after one kill
+                            break;
+                        }
+                    }
+                    None => {
+                        error!(
+                            "Failed to kill victim PID {} {}. Aborting sequence.",
+                            champion.pid, name
+                        );
+                        break;
+                    }
+                }
+            } else {
                 warn!("No eligible kill candidates found!");
                 break;
             }
-
-            // 3. Pick the Top Candidate
-            if let Some(candidate) = candidates.first() {
-                if let Some(victim) = self.system.process(candidate.pid) {
-                    let victim_mem = victim.memory();
-                    let victim_name = victim.name().to_string_lossy().to_string();
-                    let victim_start_time = victim.start_time();
-
-                    info!("Selected victim: {} (PID: {}). Score: {}. MatchPriority: {}", 
-                        victim_name, candidate.pid, candidate.score, 
-                        if candidate.match_index == usize::MAX { "None".to_string() } else { candidate.match_index.to_string() }
-                    );
-
-                    if self.kill_process(ctx, candidate.pid, &victim_name, victim_start_time) {
-                         if let Some(needed) = amount_needed {
-                             if victim_mem >= needed {
-                                 info!("Freed approx {} bytes (needed {}). Stopping sequence.", victim_mem, needed);
-                                 break;
-                             } else {
-                                 amount_needed = Some(needed - victim_mem);
-                                 info!("Freed {} bytes. Still need {}. Continuing...", victim_mem, amount_needed.unwrap());
-                             }
-                         } else {
-                             break;
-                         }
-                    } else {
-                        error!("Failed to kill victim PID {} {}. Aborting sequence.", candidate.pid, victim_name);
-                        send_notification("Kill Failure", 
-                        &format!("Failed to terminate process '{}' (PID {})", victim_name, candidate.pid), 
-                        "dialog-error");
-                        break;
-                    }
-                } else {
-                    // Process vanished between list generation and access
-                    continue;
-                }
-            }
         }
     }
 
-    // Replaces find_candidates + sort_candidates
-    fn get_ranked_candidates(&self, ctx: &RuntimeContext) -> Vec<KillCandidate> {
-        let my_pid = std::process::id();
+    fn get_process_name(&mut self, pid: u32) -> Option<String> {
+        if self.read_file_into_buffer(&pid.to_string(), "comm").is_ok() {
+            std::str::from_utf8(&self.read_buffer)
+                .ok()
+                .map(|s| s.trim().to_string()) // only allocate the small trimmed string
+        } else {
+            None
+        }
+    }
+
+    /// The "Hunter" Loop: Scans /proc manually to find the best kill candidate
+    /// This avoids large allocations by reusing internal buffers.
+    fn find_champion(&mut self, ctx: &RuntimeContext) -> Option<Champion> {
         let current_uid = Uid::effective();
         let is_root = current_uid.is_root();
-        let current_uid_str = current_uid.to_string();
-        
-        let mut candidates: Vec<KillCandidate> = self.system.processes().iter()
-            .filter(|(pid, process)| {
-                // Filter 1: Never kill self
-                if pid.as_u32() == my_pid { return false; } 
+        let my_pid = std::process::id();
 
-                // Filter 2: Ownership Check (if not root)
+        let mut current_champion: Option<Champion> = None;
+
+        // Manual /proc implementation using std::fs::read_dir
+        let entries = match fs::read_dir("/proc") {
+            Ok(iter) => iter,
+            Err(e) => {
+                error!("Failed to read /proc: {}", e);
+                return None;
+            }
+        };
+
+        for entry in entries {
+            if let Ok(entry) = entry {
+                // Get filename (PID)
+                let file_name = entry.file_name();
+                let file_name_str = match file_name.to_str() {
+                    Some(s) => s,
+                    None => continue,
+                };
+
+                // Filter 1: Must be PID (numeric)
+                let pid: u32 = match file_name_str.parse() {
+                    Ok(p) => p,
+                    Err(_) => continue,
+                };
+
+                // Filter 2: Never kill self
+                if pid == my_pid {
+                    continue;
+                }
+
+                // Filter 3: Ownership Check (if not root)
                 if !is_root {
-                    if let Some(proc_uid) = process.user_id() {
-                        if proc_uid.to_string() != current_uid_str {
-                            return false;
+                    use std::os::unix::fs::MetadataExt;
+                    // Avoid stat call if possible, but we need UID. entry.metadata() is cached from readdir? No, usually distinct.
+                    if let Ok(meta) = entry.metadata() {
+                        if meta.uid() != current_uid.as_raw() {
+                            continue;
                         }
                     } else {
-                        return false;
+                        continue;
                     }
                 }
 
-                // Filter 3: Never kill Ignored Names
-                let name = process.name().to_string_lossy();
-                for pat in &ctx.ignore_names_regex {
-                    if pat.matches(&name) { return false; }
-                }
-                true
-            })
-            .map(|(pid, process)| {
-                let name = process.name().to_string_lossy();
-                let mut match_index = usize::MAX;
+                // ---------------------------------------------------------
+                // Analyze Process
+                // ---------------------------------------------------------
 
+                // A. Determine Match Priority (Read cmdline)
+                if self
+                    .read_file_into_buffer(file_name_str, "cmdline")
+                    .is_err()
+                {
+                    continue; // Process likely gone
+                }
+
+                // Replace nulls with spaces
+                for b in self.read_buffer.iter_mut() {
+                    if *b == 0 {
+                        *b = 32;
+                    }
+                }
+
+                // Cow::Borrowed if UTF-8, Owned if not.
+                let cmdline_cow = String::from_utf8_lossy(&self.read_buffer);
+
+                // Check Ignored
+                let mut ignored = false;
+                for pat in &ctx.ignore_names_regex {
+                    if pat.matches(&cmdline_cow) {
+                        ignored = true;
+                        break;
+                    }
+                }
+                if ignored {
+                    continue;
+                }
+
+                // Calculate Match Index
+                let mut match_index = usize::MAX;
                 for (idx, pat) in ctx.kill_targets_regex.iter().enumerate() {
-                    if pat.matches(&name) {
+                    if pat.matches(&cmdline_cow) {
                         match_index = idx;
                         break;
                     }
                 }
 
-                // Only construct expensive cmdline if name didn't match
-                if match_index == usize::MAX && !ctx.kill_targets_regex.is_empty() {
-                    let cmd_line = process.cmd().iter()
-                        .map(|s| s.to_string_lossy())
-                        .collect::<Vec<Cow<str>>>()
-                        .join(" ");
-                    
-                    for (idx, pat) in ctx.kill_targets_regex.iter().enumerate() {
-                        if pat.matches(&cmd_line) {
-                            match_index = idx;
-                            break;
+                // Check vs Current Champion (Optimization)
+                if let Some(champ) = &current_champion {
+                    if match_index > champ.match_index {
+                        continue;
+                    }
+                }
+
+                // B. Calculate Score & RSS
+                let mut rss = 0;
+                let mut score = 0;
+
+                match ctx.kill_strategy {
+                    KillStrategy::LargestRss => {
+                        // Read statm for RSS
+                        if self.read_file_into_buffer(file_name_str, "statm").is_ok() {
+                            // format: total resident share ...
+                            if let Ok(s) = std::str::from_utf8(&self.read_buffer) {
+                                let mut parts = s.split_whitespace();
+                                if let Some(_total) = parts.next() {
+                                    if let Some(res) = parts.next() {
+                                        if let Ok(pages) = res.parse::<u64>() {
+                                            rss = pages * self.page_size;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        score = rss;
+                    }
+                    KillStrategy::HighestOomScore => {
+                        // Read oom_score
+                        if self
+                            .read_file_into_buffer(file_name_str, "oom_score")
+                            .is_ok()
+                        {
+                            if let Ok(s) = std::str::from_utf8(&self.read_buffer) {
+                                if let Ok(val) = s.trim().parse::<i32>() {
+                                    score = val as u64;
+                                }
+                            }
                         }
                     }
                 }
 
-                // 2. Calculate Kill Score
-                let score = match ctx.kill_strategy {
-                    KillStrategy::LargestRss => process.memory(),
-                    KillStrategy::HighestOomScore => get_oom_score(*pid) as u64,
-                };
-
-                KillCandidate {
-                    pid: *pid,
-                    score,
-                    match_index,
+                // Final Comparison
+                if let Some(champ) = &current_champion {
+                    if match_index == champ.match_index {
+                        if score <= champ.score {
+                            continue;
+                        }
+                    } else if match_index > champ.match_index {
+                        continue;
+                    }
                 }
-            })
-            .collect();
 
-        // 3. Sort: First by Match Priority (Ascending), Then by Score (Descending)
-        candidates.sort_by(|a, b| {
-            // Compare Match Index (Lower index = Higher priority)
-            match a.match_index.cmp(&b.match_index) {
-                Ordering::Equal => {
-                    // If priority is same, largest score dies first
-                    b.score.cmp(&a.score)
-                },
-                other => other,
+                // C. Become the Champion (Read stat for Start Time)
+                if self.read_file_into_buffer(file_name_str, "stat").is_ok() {
+                    if let Ok(s) = std::str::from_utf8(&self.read_buffer) {
+                        // Robust parsing: "pid (comm) state ppid ..."
+                        // Use split_once on ") " to correctly handle ')' in comm
+                        if let Some((_before, after_comm)) = s.split_once(") ") {
+                            // fields in after_comm:
+                            // 0:state ... 19:starttime (index 19 in this slice? No, count carefully)
+                            // Global stat fields:
+                            // 1: pid, 2: comm, 3: state, ..., 22: starttime
+                            // after_comm starts at field 3 (state).
+                            // So index 0 = field 3.
+                            // We want field 22.
+                            // Offset = 22 - 3 = 19.
+                            // So .nth(19) is correct.
+
+                            if let Some(start_time_str) = after_comm.split_whitespace().nth(19) {
+                                if let Ok(st) = start_time_str.parse::<u64>() {
+                                    current_champion = Some(Champion {
+                                        pid,
+                                        score,
+                                        rss,
+                                        match_index,
+                                        start_time: st,
+                                        // Name removed to avoid allocation
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
             }
-        });
+        }
 
-        candidates
+        // Post-Loop: If strategy was OOM Score, we might have 0 RSS in the champion.
+        if let Some(ref mut champ) = current_champion {
+            if champ.rss == 0 {
+                if self
+                    .read_file_into_buffer(&champ.pid.to_string(), "statm")
+                    .is_ok()
+                {
+                    if let Ok(s) = std::str::from_utf8(&self.read_buffer) {
+                        let mut parts = s.split_whitespace();
+                        if let Some(_total) = parts.next() {
+                            if let Some(res) = parts.next() {
+                                if let Ok(pages) = res.parse::<u64>() {
+                                    champ.rss = pages * self.page_size;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        current_champion
     }
 
-    fn kill_process(&mut self, ctx: &RuntimeContext, pid: sysinfo::Pid, name: &str, create_time: u64) -> bool {
-        let nix_pid = NixPid::from_raw(pid.as_u32() as i32);
-        
-        info!("Sending SIGTERM to process '{}' (PID: {})", name, pid);
+    fn read_file_into_buffer(&mut self, pid_str: &str, file: &str) -> std::io::Result<usize> {
+        self.path_buffer.clear();
+        write!(self.path_buffer, "/proc/{}/{}", pid_str, file).unwrap();
+
+        let mut f = File::open(&self.path_buffer)?;
+
+        // Zero-allocation read: reuse capacity
+        self.read_buffer.clear();
+        let capacity = self.read_buffer.capacity();
+
+        // Safety: We treat the buffer as uninitialized (though it was 0-filled or has old data).
+        // File::read will overwrite.
+        unsafe {
+            self.read_buffer.set_len(capacity);
+        }
+
+        let bytes_read = f.read(&mut self.read_buffer)?;
+
+        unsafe {
+            self.read_buffer.set_len(bytes_read);
+        }
+
+        Ok(bytes_read)
+    }
+
+    fn kill_process(&mut self, ctx: &RuntimeContext, victim: &Champion, name: &str) -> Option<u64> {
+        let nix_pid = NixPid::from_raw(victim.pid as i32);
+
+        // 1. Send SIGTERM
+        info!(
+            "Sending SIGTERM to process '{}' (PID: {})",
+            name, victim.pid
+        );
         if let Err(e) = kill(nix_pid, Signal::SIGTERM) {
             if e == nix::errno::Errno::ESRCH {
-                info!("Process {} already gone (ESRCH) during SIGTERM.", pid);
-                return true;
+                info!(
+                    "Process {} already gone (ESRCH) during SIGTERM.",
+                    victim.pid
+                );
+                return Some(victim.rss);
             }
-            error!("Failed to send SIGTERM to {}: {}", pid, e);
-            return false;
+            error!("Failed to send SIGTERM to {}: {}", victim.pid, e);
+            return None;
         }
 
         thread::sleep(Duration::from_millis(ctx.sigterm_wait_ms));
 
-        // Refill process list specifically to check this PID
-        self.system.refresh_processes(ProcessesToUpdate::Some(&[pid]), true);
-        
-        // Check if gone
-        if self.system.process(pid).is_none() {
-             info!("Process {} terminated gracefully.", pid);
-             send_notification("System Load Shedding", &format!("Terminated process '{}' (PID {}) to prevent system freeze.", name, pid), "process-stop");
-             return true;
-        }
-        
-        // Check if PID reused (safety)
-        if let Some(process) = self.system.process(pid) {
-            if process.start_time() != create_time {
-                 send_notification("System Load Shedding", &format!("Terminated process '{}' (PID {}) to prevent system freeze.", name, pid), "process-stop");
-                 info!("Process {} terminated (PID reused).", pid);
-                 return true;
+        // 2. Verify Identity (PID Reuse Check)
+        if self
+            .read_file_into_buffer(&victim.pid.to_string(), "stat")
+            .is_ok()
+        {
+            if let Ok(s) = std::str::from_utf8(&self.read_buffer) {
+                if let Some((_before, after_comm)) = s.split_once(") ") {
+                    if let Some(start_time_str) = after_comm.split_whitespace().nth(19) {
+                        if let Ok(new_st) = start_time_str.parse::<u64>() {
+                            if new_st != victim.start_time {
+                                info!(
+                                    "Process {} terminated (PID reused) during wait.",
+                                    victim.pid
+                                );
+                                send_notification(
+                                    "System Load Shedding",
+                                    &format!("Terminated process '{}' (PID {})", name, victim.pid),
+                                    "process-stop",
+                                );
+                                return Some(victim.rss);
+                            }
+                        }
+                    }
+                }
             }
+        } else {
+            // Process GONE
+            info!(
+                "Process {} terminated gracefully after SIGTERM.",
+                victim.pid
+            );
+            send_notification(
+                "System Load Shedding",
+                &format!("Terminated process '{}' (PID {})", name, victim.pid),
+                "process-stop",
+            );
+            return Some(victim.rss);
         }
 
-        info!("Process {} still running. Sending SIGKILL.", pid);
+        // 3. SIGKILL
+        info!("Process {} still running. Sending SIGKILL.", victim.pid);
         if let Err(e) = kill(nix_pid, Signal::SIGKILL) {
-             error!("Failed to send SIGKILL to {}: {}", pid, e);
-             return false;
+            error!("Failed to send SIGKILL to {}: {}", victim.pid, e);
+            return None;
         }
-        
-        send_notification("System Load Shedding", &format!("Force killed process '{}' (PID {}) to prevent system freeze.", name, pid), "process-stop");
-        true
-    }
-}
 
-fn get_oom_score(pid: sysinfo::Pid) -> i32 {
-    let path = format!("/proc/{}/oom_score", pid);
-    if let Ok(s) = fs::read_to_string(path) {
-        if let Ok(val) = s.trim().parse::<i32>() {
-            return val;
-        }
+        send_notification(
+            "System Load Shedding",
+            &format!("Force killed process '{}' (PID {})", name, victim.pid),
+            "process-stop",
+        );
+        Some(victim.rss)
     }
-    0
 }
 
 fn send_notification(title: &str, body: &str, icon: &str) {
