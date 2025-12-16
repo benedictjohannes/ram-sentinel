@@ -408,12 +408,15 @@ impl SentinelEvent {
                     "process-stop",
                 );
             }
-            SentinelEvent::Message {
-                level: LogLevel::Error,
-                text,
-            } => {
-                Self::send_notification("Ram Sentinel Error", text, "dialog-error");
-            }
+            SentinelEvent::Message { level, text, .. } => match level {
+                LogLevel::Warn => {
+                    Self::send_notification("Ram Sentinel Warning", text, "dialog-warning");
+                }
+                LogLevel::Error => {
+                    Self::send_notification("Ram Sentinel Error", text, "dialog-error");
+                }
+                _ => {}
+            },
             _ => {}
         }
     }
