@@ -163,7 +163,7 @@ impl Pattern {
 
 impl Config {
     pub fn load(cli_config_path: Option<PathBuf>) -> Result<RuntimeContext, ConfigError> {
-        let config = match cli_config_path {
+        let mut config = match cli_config_path {
             Some(path) => {
                 if !path.exists() {
                     // Was Exit code 2
@@ -288,7 +288,7 @@ impl Config {
         }
     }
 
-    fn validate(&self) -> Result<(), ConfigError> {
+    fn validate(&mut self) -> Result<(), ConfigError> {
         let psi_empty = self.psi.as_ref().map_or(true, |p| p.is_effectively_empty());
         let ram_empty = self.ram.as_ref().map_or(true, |r| r.is_effectively_empty());
         let swap_empty = self
@@ -298,6 +298,15 @@ impl Config {
 
         if psi_empty && ram_empty && swap_empty {
             return Err(ConfigError::EffectiveEmpty);
+        }
+        if psi_empty {
+            self.psi = None;
+        }
+        if ram_empty {
+            self.ram = None;
+        }
+        if swap_empty {
+            self.swap = None;
         }
 
         if self.check_interval_ms > 300000 {
