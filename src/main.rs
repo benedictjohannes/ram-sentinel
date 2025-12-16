@@ -1,28 +1,28 @@
 mod config;
 mod config_error;
 mod killer;
+mod logging; // Added
 mod monitor;
 mod psi;
 mod system;
 mod utils;
 
 use clap::Parser;
-use env_logger::Env;
-use log::{debug, error, info, warn};
-use notify_rust::Notification;
+
+use nix::sys::signal::{SigHandler, Signal, signal};
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 use std::process::exit;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::sleep;
 use std::time::Duration;
-use std::sync::atomic::{AtomicBool, Ordering};
-use nix::sys::signal::{signal, SigHandler, Signal};
 
-use crate::config::{Config, MemoryConfigParsed, RuntimeContext};
+use crate::config::{Config, RuntimeContext};
 use crate::killer::Killer;
-use crate::monitor::{KillReason, Monitor, MonitorStatus};
-use crate::system::get_systemd_unit;
+use crate::logging::{LogLevel, LogMode, SentinelEvent};
+use crate::monitor::{Monitor, MonitorStatus};
+use crate::system::get_systemd_unit; // Added
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
 
@@ -37,14 +37,22 @@ struct Cli {
     #[arg(long, short = 'c', value_name = "FILE")]
     config: Option<PathBuf>,
 
+    /// Optional Log Format. Defaults to "compact".
+    #[arg(long, value_name = "LOG_FORMAT", default_value = "compact")]
+    log_format: LogMode,
+    
+    /// Optional Log Level. Defaults to "info".
+    #[arg(long, value_name = "LOG_LEVEL", default_value = "info")]
+    log_level: LogLevel,
+    
     /// Run in "Dry Run" mode. Monitors memory but does not kill any processes.
     #[arg(long)]
     no_kill: bool,
-
+    
     /// Optional Path to print configuration to. Defaults to stdout.
     #[arg(long, value_name = "FILE", num_args(0..=1), default_missing_value = "-")]
     print_config: Option<PathBuf>,
-
+    
     /// Optional Path to print systemd user unit to. Defaults to stdout.
     #[arg(long, value_name = "FILE", num_args(0..=1), default_missing_value = "-")]
     print_systemd_user_unit: Option<PathBuf>,
@@ -56,11 +64,23 @@ fn handle_output(path_arg: Option<PathBuf>, content: &str) {
         if path.to_string_lossy() == "-" {
             println!("{}", content);
         } else {
-            info!("Writing content to file: {:?}", path);
+            SentinelEvent::Message {
+                level: LogLevel::Debug,
+                text: format!("Writing content to file: {:?}", path),
+            }
+            .emit();
             match fs::File::create(&path).and_then(|mut file| file.write_all(content.as_bytes())) {
-                Ok(_) => debug!("Successfully wrote to {:?}", path),
+                Ok(_) => SentinelEvent::Message {
+                    level: LogLevel::Debug,
+                    text: format!("Successfully wrote to {:?}", path),
+                }
+                .emit(),
                 Err(e) => {
-                    error!("Error writing to file {:?}: {}", path, e);
+                    SentinelEvent::Message {
+                        level: LogLevel::Error,
+                        text: format!("Error writing to file {:?}: {}", path, e),
+                    }
+                    .emit();
                     exit(1);
                 }
             }
@@ -70,20 +90,29 @@ fn handle_output(path_arg: Option<PathBuf>, content: &str) {
 }
 
 fn main() {
-    env_logger::Builder::from_env(Env::default().default_filter_or("info")).init();
-    
+    let args = Cli::parse();
+
+    logging::set_logging_mode(args.log_format);
+    logging::set_logging_level(args.log_level);
+
     // Register signal handlers
     unsafe {
         let handler = SigHandler::Handler(handle_shutdown_signal);
         if let Err(e) = signal(Signal::SIGTERM, handler) {
-            error!("Failed to register SIGTERM handler: {}", e);
+            SentinelEvent::Message {
+                level: LogLevel::Error,
+                text: format!("Failed to register SIGTERM handler: {}", e),
+            }
+            .emit();
         }
         if let Err(e) = signal(Signal::SIGINT, handler) {
-            error!("Failed to register SIGINT handler: {}", e);
+            SentinelEvent::Message {
+                level: LogLevel::Error,
+                text: format!("Failed to register SIGINT handler: {}", e),
+            }
+            .emit();
         }
     }
-
-    let args = Cli::parse();
 
     // --- Handle Utility Flags ---
     if args.print_systemd_user_unit.is_some() {
@@ -99,11 +128,14 @@ fn main() {
         return;
     }
 
-    // Normal startup
     let ctx = match Config::load(args.config) {
         Ok(c) => c,
         Err(e) => {
-            error!("{}", e);
+            SentinelEvent::Message {
+                level: LogLevel::Error,
+                text: format!("Configuration Error: {}", e),
+            }
+            .emit();
             exit(e.exit_code());
         }
     };
@@ -115,83 +147,51 @@ fn run_loop(ctx: RuntimeContext, no_kill: bool) {
     let mut monitor = Monitor::new();
     let mut killer = Killer::new();
 
-    info!(
-        "ram-sentinel started. Interval: {}ms",
-        ctx.check_interval_ms
-    );
+    SentinelEvent::Startup {
+        interval_ms: ctx.check_interval_ms,
+    }
+    .emit();
 
     while RUNNING.load(Ordering::SeqCst) {
         match monitor.check(&ctx) {
-            MonitorStatus::Normal => {
-                debug!("Status: Normal");
-            }
-            MonitorStatus::Warn(msg) => {
-                warn!("{}", msg);
-                send_notification("Low Memory Warning", &msg, "dialog-warning");
-            }
-            MonitorStatus::Kill(reason) => {
-                let reason_desc = format!("{:?}", reason);
-                error!("Kill Triggered: {}", reason_desc);
+            MonitorStatus::Normal => {}
+            MonitorStatus::Warn => {}
+            MonitorStatus::Kill(event) => {
+                event.emit();
 
                 if no_kill {
-                    info!("--no-kill active. Skipping kill sequence.");
-                } else {
-                    let amount_needed = match reason {
-                        KillReason::PsiPressure(_, amount) => Some(amount),
-                        KillReason::LowMemory(_) => {
-                            if let Some(config) = &ctx.ram {
-                                monitor.refresh_memory();
-                                calc_needed(config, monitor.get_system().available_memory(), monitor.get_system().total_memory())
-                            } else {
-                                None
-                            }
-                        }
-                        KillReason::LowSwap(_) => {
-                            if let Some(config) = &ctx.swap {
-                                monitor.refresh_memory();
-                                calc_needed(config, monitor.get_system().free_swap(), monitor.get_system().total_swap())
-                            } else {
-                                None
-                            }
-                        }
-                    };
-
-                    if amount_needed.is_none() {
-                        info!("Kill sequence aborted: calculated needed memory is 0 (system likely recovered).");
-                        continue;
+                    SentinelEvent::Message {
+                        level: LogLevel::Info,
+                        text: "--no-kill active. Skipping kill sequence.".to_string(),
                     }
-
-                    killer.kill_sequence(&ctx, &reason_desc, amount_needed);
+                    .emit();
+                } else {
+                    if let SentinelEvent::KillTriggered { amount_needed, .. } = &event {
+                        if let Some(needed) = *amount_needed {
+                            killer.kill_sequence(&ctx, Some(needed));
+                        } else {
+                            SentinelEvent::KillSequenceAborted {
+                                reason: "Kill triggered but amount_needed is None/Zero".to_string(),
+                            }
+                            .emit();
+                        }
+                    } else {
+                        SentinelEvent::Message {
+                            level: LogLevel::Error,
+                            text: "Monitor returned non-KillTriggered event in Kill status"
+                                .to_string(),
+                        }
+                        .emit();
+                    }
                 }
             }
         }
-
         sleep(Duration::from_millis(ctx.check_interval_ms));
     }
-    
-    info!("Exiting ram-sentinel.");
-}
 
-fn calc_needed(config: &MemoryConfigParsed, current_free: u64, total: u64) -> Option<u64> {
-    let mut target = 0;
-
-    if let Some(bytes) = config.kill_min_free_bytes {
-        target = bytes;
-    } else if let Some(percent) = config.kill_min_free_percent {
-        target = (total as f64 * (percent as f64 / 100.0)) as u64;
+    SentinelEvent::Message {
+        level: LogLevel::Info,
+        text: "Exiting ram-sentinel.".to_string(),
     }
-
-    if target > current_free {
-        Some(target - current_free)
-    } else {
-        None
-    }
-}
-
-fn send_notification(title: &str, body: &str, icon: &str) {
-    let _ = Notification::new()
-        .summary(title)
-        .body(body)
-        .icon(icon)
-        .show();
+    .emit();
 }

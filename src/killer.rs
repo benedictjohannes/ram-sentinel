@@ -1,8 +1,7 @@
 use crate::config::{KillStrategy, RuntimeContext};
-use log::{error, info, warn};
+use crate::logging::SentinelEvent;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::{Pid as NixPid, SysconfVar, Uid, sysconf};
-use notify_rust::Notification;
 use std::fmt::Write; // For writing to path_buffer
 use std::fs::{self, File};
 use std::io::Read;
@@ -41,17 +40,7 @@ impl Killer {
         }
     }
 
-    pub fn kill_sequence(
-        &mut self,
-        ctx: &RuntimeContext,
-        reason_desc: &str,
-        mut amount_needed: Option<u64>,
-    ) {
-        info!(
-            "Initiating Kill Sequence. Reason: {}. Needed: {:?}",
-            reason_desc, amount_needed
-        );
-
+    pub fn kill_sequence(&mut self, ctx: &RuntimeContext, mut amount_needed: Option<u64>) {
         loop {
             // 1. Scan /proc and find the best candidate ("The Champion")
             let champion_opt = self.find_champion(ctx);
@@ -62,36 +51,27 @@ impl Killer {
                     .get_process_name(champion.pid)
                     .unwrap_or_else(|| "unknown".to_string());
 
-                info!(
-                    "Selected victim: {} (PID: {}). Score: {}. RSS: {}. MatchPriority: {}",
-                    name,
-                    champion.pid,
-                    champion.score,
-                    champion.rss,
-                    if champion.match_index == usize::MAX {
-                        "None".to_string()
-                    } else {
-                        champion.match_index.to_string()
-                    }
-                );
+                SentinelEvent::KillCandidateSelected {
+                    pid: champion.pid,
+                    process_name: name.clone(),
+                    score: champion.score,
+                    rss: champion.rss,
+                    match_index: champion.match_index,
+                }
+                .emit();
 
                 // 2. Kill Logic
                 match self.kill_process(ctx, &champion, &name) {
                     Some(freed_bytes) => {
                         if let Some(needed) = amount_needed {
                             if freed_bytes >= needed {
-                                info!(
-                                    "Freed approx {} bytes (needed {}). Stopping sequence.",
-                                    freed_bytes, needed
-                                );
+                                SentinelEvent::KillSequenceAborted {
+                                    reason: format!("Freed {} bytes. Target reached.", freed_bytes),
+                                }
+                                .emit();
                                 break;
                             } else {
                                 amount_needed = Some(needed - freed_bytes);
-                                info!(
-                                    "Freed {} bytes. Still need {}. Continuing...",
-                                    freed_bytes,
-                                    amount_needed.unwrap()
-                                );
                             }
                         } else {
                             // If no specific amount was requested, stop after one kill
@@ -99,15 +79,21 @@ impl Killer {
                         }
                     }
                     None => {
-                        error!(
-                            "Failed to kill victim PID {} {}. Aborting sequence.",
-                            champion.pid, name
-                        );
+                        SentinelEvent::KillSequenceAborted {
+                            reason: format!(
+                                "Failed to kill victim PID {} {}. Aborting.",
+                                champion.pid, name
+                            ),
+                        }
+                        .emit();
                         break;
                     }
                 }
             } else {
-                warn!("No eligible kill candidates found!");
+                SentinelEvent::KillSequenceAborted {
+                    reason: "No eligible kill candidates found!".to_string(),
+                }
+                .emit();
                 break;
             }
         }
@@ -136,7 +122,10 @@ impl Killer {
         let entries = match fs::read_dir("/proc") {
             Ok(iter) => iter,
             Err(e) => {
-                error!("Failed to read /proc: {}", e);
+                SentinelEvent::KillSequenceAborted {
+                    reason: format!("Failed to read /proc: {}", e),
+                }
+                .emit();
                 return None;
             }
         };
@@ -359,19 +348,19 @@ impl Killer {
         let nix_pid = NixPid::from_raw(victim.pid as i32);
 
         // 1. Send SIGTERM
-        info!(
-            "Sending SIGTERM to process '{}' (PID: {})",
-            name, victim.pid
-        );
         if let Err(e) = kill(nix_pid, Signal::SIGTERM) {
             if e == nix::errno::Errno::ESRCH {
-                info!(
-                    "Process {} already gone (ESRCH) during SIGTERM.",
-                    victim.pid
-                );
+                SentinelEvent::KillCandidateIgnored {
+                    pid: victim.pid,
+                    reason: "ESRCH (Already gone)".to_string(),
+                }
+                .emit();
                 return Some(victim.rss);
             }
-            error!("Failed to send SIGTERM to {}: {}", victim.pid, e);
+            SentinelEvent::KillSequenceAborted {
+                reason: format!("Failed to send SIGTERM to {}: {}", victim.pid, e),
+            }
+            .emit();
             return None;
         }
 
@@ -387,15 +376,11 @@ impl Killer {
                     if let Some(start_time_str) = after_comm.split_whitespace().nth(19) {
                         if let Ok(new_st) = start_time_str.parse::<u64>() {
                             if new_st != victim.start_time {
-                                info!(
-                                    "Process {} terminated (PID reused) during wait.",
-                                    victim.pid
-                                );
-                                send_notification(
-                                    "System Load Shedding",
-                                    &format!("Terminated process '{}' (PID {})", name, victim.pid),
-                                    "process-stop",
-                                );
+                                SentinelEvent::KillCandidateIgnored {
+                                    pid: victim.pid,
+                                    reason: "PID Reuse detected during wait".to_string(),
+                                }
+                                .emit();
                                 return Some(victim.rss);
                             }
                         }
@@ -404,38 +389,32 @@ impl Killer {
             }
         } else {
             // Process GONE
-            info!(
-                "Process {} terminated gracefully after SIGTERM.",
-                victim.pid
-            );
-            send_notification(
-                "System Load Shedding",
-                &format!("Terminated process '{}' (PID {})", name, victim.pid),
-                "process-stop",
-            );
+            SentinelEvent::KillExecuted {
+                pid: victim.pid,
+                process_name: name.to_string(),
+                strategy: "SIGTERM".to_string(),
+                rss_freed: victim.rss,
+            }
+            .emit();
             return Some(victim.rss);
         }
 
         // 3. SIGKILL
-        info!("Process {} still running. Sending SIGKILL.", victim.pid);
         if let Err(e) = kill(nix_pid, Signal::SIGKILL) {
-            error!("Failed to send SIGKILL to {}: {}", victim.pid, e);
+            SentinelEvent::KillSequenceAborted {
+                reason: format!("Failed to send SIGKILL to {}: {}", victim.pid, e),
+            }
+            .emit();
             return None;
         }
 
-        send_notification(
-            "System Load Shedding",
-            &format!("Force killed process '{}' (PID {})", name, victim.pid),
-            "process-stop",
-        );
+        SentinelEvent::KillExecuted {
+            pid: victim.pid,
+            process_name: name.to_string(),
+            strategy: "SIGKILL".to_string(),
+            rss_freed: victim.rss,
+        }
+        .emit();
         Some(victim.rss)
     }
-}
-
-fn send_notification(title: &str, body: &str, icon: &str) {
-    let _ = Notification::new()
-        .summary(title)
-        .body(body)
-        .icon(icon)
-        .show();
 }

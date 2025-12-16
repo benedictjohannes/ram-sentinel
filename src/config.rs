@@ -1,11 +1,11 @@
+use crate::config_error::ConfigError;
+use crate::logging::{SentinelEvent,LogLevel};
+use crate::psi;
+use crate::utils::parse_size;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use regex::Regex;
-use log::info;
-use crate::psi;
-use crate::utils::parse_size;
-use crate::config_error::ConfigError;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -33,7 +33,6 @@ pub struct Config {
     #[serde(default = "default_strategy")]
     pub kill_strategy: KillStrategy,
 }
-
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -218,7 +217,8 @@ impl Config {
              }
         }
 
-        info!("No configuration file found. Loading sane defaults.");
+        SentinelEvent::Message { level: LogLevel::Info, text: "No configuration file found. Loading sane defaults.".to_string() }
+            .emit();
         Ok(Self::sane_defaults())
     }
 
