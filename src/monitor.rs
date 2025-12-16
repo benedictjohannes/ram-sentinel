@@ -256,8 +256,9 @@ impl Monitor {
                 memory_available_percent: self.ram_percent,
                 swap_free_bytes: self.swap_bytes,
                 swap_free_percent: self.swap_percent,
-                psi_pressure_curr: self.psi_pressure,
-            }.emit();
+                psi_pressure: self.psi_pressure,
+            }
+            .emit();
         }
 
         // Final Decision (Warnings)
@@ -284,7 +285,6 @@ impl Monitor {
     fn read_psi() -> Option<u64> {
         read_psi_total().ok()
     }
-
 }
 
 // Helpers returning (threshold_val, type_string)

@@ -97,7 +97,7 @@ pub enum SentinelEvent {
         memory_available_percent: Option<f64>,
         swap_free_bytes: Option<u64>,
         swap_free_percent: Option<f64>,
-        psi_pressure_curr: Option<f64>,
+        psi_pressure: Option<f64>,
     },
     LowMemoryWarn {
         available_bytes: u64,
@@ -158,7 +158,7 @@ impl fmt::Display for SentinelEvent {
                 memory_available_percent: _,
                 swap_free_bytes,
                 swap_free_percent: _,
-                psi_pressure_curr,
+                psi_pressure,
             } => {
                 let avail_str = match memory_available_bytes {
                     Some(b) => Byte::from_u64(*b)
@@ -174,7 +174,7 @@ impl fmt::Display for SentinelEvent {
                     None => "N/A".to_string(),
                 };
 
-                let psi_str = match psi_pressure_curr {
+                let psi_str = match psi_pressure {
                     Some(p) => format!("{:.2}", p),
                     None => "N/A".to_string(),
                 };

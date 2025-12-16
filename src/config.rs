@@ -1,5 +1,5 @@
 use crate::config_error::ConfigError;
-use crate::logging::{SentinelEvent,LogLevel};
+use crate::logging::{LogLevel, SentinelEvent};
 use crate::psi;
 use crate::utils::parse_size;
 use regex::Regex;
@@ -26,10 +26,10 @@ pub struct Config {
     // Targeting Logic
     #[serde(default)]
     pub ignore_names: Vec<String>,
-    
-    #[serde(default = "default_kill_targets")] 
+
+    #[serde(default = "default_kill_targets")]
     pub kill_targets: Vec<String>,
-    
+
     #[serde(default = "default_strategy")]
     pub kill_strategy: KillStrategy,
 }
@@ -61,7 +61,7 @@ impl MemoryConfigParsed {
         };
 
         let kill_min_free_bytes = if let Some(s) = config.kill_min_free_bytes.as_ref() {
-             Some(parse_size(s).ok_or_else(|| {
+            Some(parse_size(s).ok_or_else(|| {
                 ConfigError::InvalidSize("killMinFreeBytes".to_string(), s.clone())
             })?)
         } else {
@@ -70,13 +70,19 @@ impl MemoryConfigParsed {
 
         if let Some(p) = config.warn_min_free_percent {
             if !(0.0..=100.0).contains(&p) {
-                return Err(ConfigError::InvalidPercent("warnMinFreePercent".to_string(), p));
+                return Err(ConfigError::InvalidPercent(
+                    "warnMinFreePercent".to_string(),
+                    p,
+                ));
             }
         }
 
         if let Some(p) = config.kill_min_free_percent {
             if !(0.0..=100.0).contains(&p) {
-                return Err(ConfigError::InvalidPercent("killMinFreePercent".to_string(), p));
+                return Err(ConfigError::InvalidPercent(
+                    "killMinFreePercent".to_string(),
+                    p,
+                ));
             }
         }
 
@@ -106,15 +112,20 @@ impl MemoryConfig {
 }
 
 // Default Generators
-fn default_interval() -> u64 { 1000 }
-fn warn_interval() -> u64 { 30000 }
-fn sigterm_wait_ms() -> u64 { 5000 }
-fn default_strategy() -> KillStrategy { KillStrategy::HighestOomScore }
+fn default_interval() -> u64 {
+    1000
+}
+fn warn_interval() -> u64 {
+    30000
+}
+fn sigterm_wait_ms() -> u64 {
+    5000
+}
+fn default_strategy() -> KillStrategy {
+    KillStrategy::HighestOomScore
+}
 fn default_kill_targets() -> Vec<String> {
-    vec![
-        "type=renderer".to_string(),
-        "-contentproc".to_string()
-    ]
+    vec!["type=renderer".to_string(), "-contentproc".to_string()]
 }
 
 #[derive(Debug)]
@@ -155,7 +166,7 @@ impl Config {
         let config = match cli_config_path {
             Some(path) => {
                 if !path.exists() {
-                     // Was Exit code 2
+                    // Was Exit code 2
                     return Err(ConfigError::ConfigFileNotFound(path));
                 }
                 Self::parse_file(&path)?
@@ -188,7 +199,7 @@ impl Config {
         };
 
         let swap_parsed = if let Some(s) = config.swap {
-             Some(MemoryConfigParsed::try_from_config(s)?)
+            Some(MemoryConfigParsed::try_from_config(s)?)
         } else {
             None
         };
@@ -207,30 +218,36 @@ impl Config {
     }
 
     fn find_and_load_config() -> Result<Config, ConfigError> {
-        if let Some(config_home) = directories::BaseDirs::new().map(|b| b.config_dir().to_path_buf()) {
-             let extensions = ["yaml", "yml", "json", "toml"];
-             for ext in &extensions {
+        if let Some(config_home) =
+            directories::BaseDirs::new().map(|b| b.config_dir().to_path_buf())
+        {
+            let extensions = ["yaml", "yml", "json", "toml"];
+            for ext in &extensions {
                 let path = config_home.join(format!("ram-sentinel.{}", ext));
                 if path.exists() {
-                     return Self::parse_file(&path);
+                    return Self::parse_file(&path);
                 }
-             }
+            }
         }
 
-        SentinelEvent::Message { level: LogLevel::Info, text: "No configuration file found. Loading sane defaults.".to_string() }
-            .emit();
+        SentinelEvent::Message {
+            level: LogLevel::Info,
+            text: "No configuration file found. Loading sane defaults.".to_string(),
+        }
+        .emit();
         Ok(Self::sane_defaults())
     }
 
     fn parse_file(path: &Path) -> Result<Config, ConfigError> {
-        let content = fs::read_to_string(path)
-            .map_err(|e| ConfigError::FileRead(path.to_path_buf(), e))?;
+        let content =
+            fs::read_to_string(path).map_err(|e| ConfigError::FileRead(path.to_path_buf(), e))?;
 
         let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("yaml");
 
         macro_rules! parse {
             ($func:expr) => {
-                $func(&content).map_err(|e| ConfigError::FileParse(path.to_path_buf(), e.to_string()))
+                $func(&content)
+                    .map_err(|e| ConfigError::FileParse(path.to_path_buf(), e.to_string()))
             };
         }
 
@@ -257,10 +274,10 @@ impl Config {
                 kill_min_free_percent: Some(5.0),
             }),
             swap: Some(MemoryConfig {
-                 warn_min_free_bytes: None,
-                 warn_min_free_percent: None,
-                 kill_min_free_bytes: None,
-                 kill_min_free_percent: None,
+                warn_min_free_bytes: None,
+                warn_min_free_percent: None,
+                kill_min_free_bytes: None,
+                kill_min_free_percent: None,
             }),
             check_interval_ms: default_interval(),
             warn_reset_ms: warn_interval(),
@@ -274,8 +291,11 @@ impl Config {
     fn validate(&self) -> Result<(), ConfigError> {
         let psi_empty = self.psi.as_ref().map_or(true, |p| p.is_effectively_empty());
         let ram_empty = self.ram.as_ref().map_or(true, |r| r.is_effectively_empty());
-        let swap_empty = self.swap.as_ref().map_or(true, |s| s.is_effectively_empty());
-        
+        let swap_empty = self
+            .swap
+            .as_ref()
+            .map_or(true, |s| s.is_effectively_empty());
+
         if psi_empty && ram_empty && swap_empty {
             return Err(ConfigError::EffectiveEmpty);
         }
@@ -285,9 +305,9 @@ impl Config {
         }
 
         if self.check_interval_ms < 100 {
-             return Err(ConfigError::IntervalTooLow(self.check_interval_ms));
+            return Err(ConfigError::IntervalTooLow(self.check_interval_ms));
         }
-        
+
         Ok(())
     }
 }
@@ -297,15 +317,15 @@ fn compile_patterns(raw: &[String], field_name: &str) -> Result<Vec<Pattern>, Co
     for (i, s) in raw.iter().enumerate() {
         if s.starts_with('/') && s.ends_with('/') && s.len() > 2 {
             // Case 1: Regex
-            let regex_str = &s[1..s.len()-1];
+            let regex_str = &s[1..s.len() - 1];
             match Regex::new(regex_str) {
                 Ok(re) => patterns.push(Pattern::Regex(re)),
                 Err(e) => {
                     return Err(ConfigError::RegexError(
-                        field_name.to_string(), 
-                        i, 
-                        s.clone(), 
-                        e.to_string()
+                        field_name.to_string(),
+                        i,
+                        s.clone(),
+                        e.to_string(),
                     ));
                 }
             }

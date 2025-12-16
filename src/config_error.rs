@@ -13,8 +13,8 @@ pub enum ConfigError {
     PsiConfig(String),
     PsiUnavailable(String),
     RegexError(String, usize, String, String), // field_name, index, pattern, error
-    InvalidSize(String, String), // field_name, value
-    InvalidPercent(String, f32), // field_name, value
+    InvalidSize(String, String),               // field_name, value
+    InvalidPercent(String, f32),               // field_name, value
 }
 
 impl ConfigError {
@@ -38,18 +38,40 @@ impl ConfigError {
 impl fmt::Display for ConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ConfigError::FileRead(path, e) => write!(f, "Error reading config file {:?}: {}", path, e),
-            ConfigError::FileParse(path, e) => write!(f, "Error parsing config file {:?}: {}", path, e),
-            ConfigError::ConfigFileNotFound(path) => write!(f, "Error: Config file specified but not found: {:?}", path),
-            ConfigError::EffectiveEmpty => write!(f, "Configuration is effectively empty (no metrics enabled)."),
-            ConfigError::IntervalTooHigh(val) => write!(f, "check_interval_ms > 300000. Got: {}", val),
+            ConfigError::FileRead(path, e) => {
+                write!(f, "Error reading config file {:?}: {}", path, e)
+            }
+            ConfigError::FileParse(path, e) => {
+                write!(f, "Error parsing config file {:?}: {}", path, e)
+            }
+            ConfigError::ConfigFileNotFound(path) => {
+                write!(f, "Error: Config file specified but not found: {:?}", path)
+            }
+            ConfigError::EffectiveEmpty => write!(
+                f,
+                "Configuration is effectively empty (no metrics enabled)."
+            ),
+            ConfigError::IntervalTooHigh(val) => {
+                write!(f, "check_interval_ms > 300000. Got: {}", val)
+            }
             ConfigError::IntervalTooLow(val) => write!(f, "check_interval_ms < 100. Got: {}", val),
             ConfigError::PsiConfig(e) => write!(f, "PSI Configuration Error: {}", e),
-            ConfigError::PsiUnavailable(e) => write!(f, "PSI enabled but /proc/pressure/memory is not valid: {}", e),
-            ConfigError::RegexError(field, idx, pat, err) => write!(f, "Invalid regex in {}: entry {} ('{}'): {}", field, idx, pat, err),
-            ConfigError::InvalidSize(field, val) => write!(f, "Invalid size string in {}: '{}'", field, val),
-            ConfigError::InvalidPercent(field, val) => write!(f, "{} must be between 0-100, got {}", field, val),
+            ConfigError::PsiUnavailable(e) => write!(
+                f,
+                "PSI enabled but /proc/pressure/memory is not valid: {}",
+                e
+            ),
+            ConfigError::RegexError(field, idx, pat, err) => write!(
+                f,
+                "Invalid regex in {}: entry {} ('{}'): {}",
+                field, idx, pat, err
+            ),
+            ConfigError::InvalidSize(field, val) => {
+                write!(f, "Invalid size string in {}: '{}'", field, val)
+            }
+            ConfigError::InvalidPercent(field, val) => {
+                write!(f, "{} must be between 0-100, got {}", field, val)
+            }
         }
     }
 }
-

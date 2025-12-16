@@ -1,10 +1,10 @@
+use crate::utils::parse_size;
 use serde::{Deserialize, Serialize};
 use std::error::Error;
 use std::fmt;
 use std::fs;
 use std::io;
 use std::num::ParseIntError;
-use crate::utils::parse_size;
 
 #[derive(Debug)]
 pub enum PsiError {
@@ -88,47 +88,59 @@ impl PsiConfigParsed {
     pub fn try_from_config(config: PsiConfig, global_interval: u64) -> Result<Self, PsiError> {
         if let Some(warn) = config.warn_max_percent {
             if warn < 0.0 || warn > 100.0 {
-                return Err(PsiError::ValidationError(
-                    format!("PSI warn_max_percent must be between 0-100, got {}", warn)
-                ));
+                return Err(PsiError::ValidationError(format!(
+                    "PSI warn_max_percent must be between 0-100, got {}",
+                    warn
+                )));
             }
         }
         if let Some(kill) = config.kill_max_percent {
             if kill < 0.0 || kill > 100.0 {
-                return Err(PsiError::ValidationError(
-                    format!("PSI warn_max_percent must be between 0-100, got {}", kill)
-                ));
+                return Err(PsiError::ValidationError(format!(
+                    "PSI warn_max_percent must be between 0-100, got {}",
+                    kill
+                )));
             }
         }
 
         if config.kill_max_percent.is_some() && config.amount_to_free.is_none() {
-            return Err(PsiError::ValidationError("PSI kill_max_percent set but amount_to_free is missing.".to_string()));
+            return Err(PsiError::ValidationError(
+                "PSI kill_max_percent set but amount_to_free is missing.".to_string(),
+            ));
         }
-        
+
         let amount_to_free = if let Some(amt_str) = config.amount_to_free {
             let parsed_amt = parse_size(&amt_str).ok_or_else(|| {
                 PsiError::ValidationError(format!("PSI amount_to_free invalid format: {}", amt_str))
             })?;
 
             if parsed_amt == 0 {
-                return Err(PsiError::ValidationError("PSI amount_to_free is illegal (parses to 0).".to_string()));
+                return Err(PsiError::ValidationError(
+                    "PSI amount_to_free is illegal (parses to 0).".to_string(),
+                ));
             }
 
             let total_ram = crate::utils::get_total_memory();
             if parsed_amt > (total_ram / 2) {
-                 return Err(PsiError::ValidationError(format!("PSI amount_to_free ({}) exceeds 50% of total RAM ({}).", parsed_amt, total_ram)));
+                return Err(PsiError::ValidationError(format!(
+                    "PSI amount_to_free ({}) exceeds 50% of total RAM ({}).",
+                    parsed_amt, total_ram
+                )));
             }
             Some(parsed_amt)
         } else {
             None
         };
 
-        let check_interval_ms = config.check_interval_ms.unwrap_or_else(|| { std::cmp::min(global_interval * 10, 300_000) });
+        let check_interval_ms = config
+            .check_interval_ms
+            .unwrap_or_else(|| std::cmp::min(global_interval * 10, 300_000));
 
         if check_interval_ms < 100 || check_interval_ms > 300000 {
-            return Err(PsiError::ValidationError(
-                format!("PSI check_interval_ms must be between 100 and 300000, got {}", check_interval_ms)
-            ));
+            return Err(PsiError::ValidationError(format!(
+                "PSI check_interval_ms must be between 100 and 300000, got {}",
+                check_interval_ms
+            )));
         }
 
         Ok(Self {
