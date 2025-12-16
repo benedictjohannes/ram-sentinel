@@ -33,61 +33,6 @@ impl Monitor {
 
         let total = Self::read_psi();
 
-        // logging test start
-        SentinelEvent::Startup { interval_ms: 0 }.emit();
-        SentinelEvent::LowMemoryWarn {
-            available_bytes: 1024 * 1024 * 50,
-            available_percent: 5.0,
-            threshold_type: "percent".to_string(),
-            threshold_value: 10.0,
-        }
-        .emit();
-        SentinelEvent::LowSwapWarn {
-            free_bytes: 1024 * 1024 * 10,
-            free_percent: 1.0,
-            threshold_type: "percent".to_string(),
-            threshold_value: 10.0,
-        }
-        .emit();
-        SentinelEvent::PsiPressureWarn {
-            pressure_curr: 45.5,
-            threshold: 20.0,
-        }
-        .emit();
-        SentinelEvent::KillTriggered {
-            trigger: "LowMemory".to_string(),
-            observed_value: 5.0,
-            threshold_value: 10.0,
-            threshold_type: "percent".to_string(),
-            amount_needed: Some(1024 * 1024 * 500),
-        }
-        .emit();
-        SentinelEvent::KillCandidateSelected {
-            pid: 12345,
-            process_name: "chrome-dummy".to_string(),
-            score: 5000,
-            rss: 1024 * 1024 * 200,
-            match_index: 0,
-        }
-        .emit();
-        SentinelEvent::KillExecuted {
-            pid: 12345,
-            process_name: "chrome-dummy".to_string(),
-            strategy: "SIGTERM".to_string(),
-            rss_freed: 1024 * 1024 * 200,
-        }
-        .emit();
-        SentinelEvent::KillSequenceAborted {
-            reason: "Init Test Complete".to_string(),
-        }
-        .emit();
-        SentinelEvent::KillCandidateIgnored {
-            pid: 6789,
-            reason: "Dummy Verify".to_string(),
-        }
-        .emit();
-        // logging test end
-
         Self {
             system,
             last_psi_total: total,
