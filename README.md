@@ -34,9 +34,20 @@ You don't have to configure anything to get started. `ram-sentinel` ships with *
 
 ### Installation
 
+#### Using Cargo
+
 ```bash
 cargo install ram-sentinel
-````
+```
+
+#### Binary download
+
+```bash
+curl -L https://github.com/benedictjohannes/ram-sentinel/releases/latest/download/ram-sentinel-linux-amd64 -o ram-sentinel && \
+chmod +x ram-sentinel && \
+sudo mv ram-sentinel /usr/local/bin/
+```
+
 
 ### Run immediately
 
