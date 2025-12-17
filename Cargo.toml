@@ -2,16 +2,12 @@
 name = "ram-sentinel"
 version = "0.1.4"
 edition = "2024"
-description = "A Surgical OOM prevention daemon for Linux. Configurable to reads RAM, swap and/or PSI (Pressure Stall Information) to kill specific tabs/processes before system freeze."
+description = "A surgical OOM prevention daemon for Linux desktops. Configurably monitors RAM, swap, and/or PSI (Pressure Stall Information) to selectively kill low-priority processes (e.g., browser tabs) before the system freezes."
 license = "MIT"
 repository = "https://github.com/benedictjohannes/ram-sentinel"
 readme = "README.md"
-keywords = ["oom", "linux", "memory", "psi", "daemon", "cli", "ram", "swap"]
-categories = [
-    "memory-management",
-    "system-administration",
-    "command-line-utilities",
-]
+keywords = ["oom", "linux", "memory", "psi", "daemon"]
+categories = ["os::linux-apis", "memory-management", "command-line-utilities"]
 homepage = "https://github.com/benedictjohannes/ram-sentinel"
 documentation = "https://docs.rs/ram-sentinel"
 
