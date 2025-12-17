@@ -1,6 +1,6 @@
 # RAM Sentinel 🛡️
 
-🚧 Pre-release — Feedback welcome!
+🚧 [Pre-release](#roadmap) — Contributions and Feedback welcome!
 
 **The Surgical Memory Guardian for Linux Desktops.**
 
@@ -12,8 +12,7 @@
 
 **ram-sentinel** is a userspace OOM (Out-of-Memory) prevention daemon designed specifically for modern workstations. Unlike `earlyoom` or `nohang` which often act as blunt instruments (killing your heaviest app, usually your Browser or IDE), `ram-sentinel` uses **Surgical Cmdline Process Targeting** and **Pressure Stall Information (PSI)** to surgically remove specific low-value targets (like browser renderer tabs) before threatening your main workflow.
 
-It runs as a standard user (`systemd --user`), requires no root privileges, and talks to you via desktop notifications.
-
+It runs as a standard user (`systemd --user`), requires no root privileges, and talks to you via desktop notifications. In my desktop, it takes up <5MB RSS.
 
 ## 🚀 Why You Need This
 
@@ -180,3 +179,30 @@ killStrategy: highestOomScore
 3.  **Strict Override:** Configuration follows a "Manual Override" logic. If you set a specific Byte limit (`500MB`), the vague Percentage limit (`5%`) is ignored. You get exactly what you ask for.
 
 > `ram-sentinel` is heavily inspired by the excellent [`earlyoom`](https://github.com/rfjakob/earlyoom), implementing many features I wished it had (like surgical process targeting and fine grained tuning). For a deeper dive into the architectural decisions, see [GEMINI.md](GEMINI.md).
+
+### Roadmap
+
+We're in the exciting early phase. I've used ram-sentinel on my CachyOS KDE desktop myself and it appears to be solid. But expect refinements and breaking changes before 1.0. 
+
+> Feedback, issues, and PRs are **very** welcome! Contributors wanted. 👋
+
+#### 1. Comprehensive Integration Testing Framework
+
+We deliberately skip traditional unit tests—mocking the wild west of `/proc`, PSI, and real-world process chaos just breeds false confidence.
+
+Instead, we're building a full end-to-end behavioral testing suite:
+- Runs the **exact release binaries** in a clean, reproducible environment (e.g., a minimal Ubuntu VM via virsh with 2 CPUs / 4GB RAM—the perfect choke point).
+- Includes a **coordinator** to orchestrate scenarios and a **troublemaker** to simulate realistic culprits (sleeping renderer tabs, RAM-hungry spikes, mixed workloads).
+- Parses structured logs, monitors live PSI/meminfo, and asserts **surgical precision**: "Did it snipe only the lazy tabs without touching the IDE?"
+
+This gives us rock-solid, real-world proof that ram-sentinel delivers on its promises—no hype, just results. Conceptual details in [TestingFramework.md](TestingFramework.md).
+
+#### 2. Full System-Level Daemon Mode
+
+Once the testing framework is battle-hardened, we'll expand beyond userspace:
+
+- Optional **root mode** as a proper system service.
+- New CLI flag: `--listen [socket-path]` for the userspace daemon - lets the root daemon push notifications to your user session (so desktop pop-ups still work seamlessly).
+- **Cgroup v2 awareness**: Layer surgical targeting on top of cgroup pressure metrics for better scoping in containerized/mixed setups. Inspired by tools like `systemd-oomd`—thanks for the blueprint!
+
+The goal? Make ram-sentinel the go-to guardian for all things Linux: desktops, workstations, and servers. Okay, well, maybe not Android 😖
