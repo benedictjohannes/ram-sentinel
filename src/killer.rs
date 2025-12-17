@@ -1,5 +1,6 @@
 use crate::config::{KillStrategy, RuntimeContext};
-use crate::logging::SentinelEvent;
+use crate::events::SentinelEvent;
+use crate::logging;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::{Pid as NixPid, SysconfVar, Uid, sysconf};
 use std::fmt::Write; // For writing to path_buffer
@@ -51,24 +52,22 @@ impl Killer {
                     .get_process_name(champion.pid)
                     .unwrap_or_else(|| "unknown".to_string());
 
-                SentinelEvent::KillCandidateSelected {
+                logging::emit(&SentinelEvent::KillCandidateSelected {
                     pid: champion.pid,
                     process_name: name.clone(),
                     score: champion.score,
                     rss: champion.rss,
                     match_index: champion.match_index,
-                }
-                .emit();
+                });
 
                 // 2. Kill Logic
                 match self.kill_process(ctx, &champion, &name) {
                     Some(freed_bytes) => {
                         if let Some(needed) = amount_needed {
                             if freed_bytes >= needed {
-                                SentinelEvent::KillSequenceAborted {
+                                logging::emit(&SentinelEvent::KillSequenceAborted {
                                     reason: format!("Freed {} bytes. Target reached.", freed_bytes),
-                                }
-                                .emit();
+                                });
                                 break;
                             } else {
                                 amount_needed = Some(needed - freed_bytes);
@@ -79,21 +78,19 @@ impl Killer {
                         }
                     }
                     None => {
-                        SentinelEvent::KillSequenceAborted {
+                        logging::emit(&SentinelEvent::KillSequenceAborted {
                             reason: format!(
                                 "Failed to kill victim PID {} {}. Aborting.",
                                 champion.pid, name
                             ),
-                        }
-                        .emit();
+                        });
                         break;
                     }
                 }
             } else {
-                SentinelEvent::KillSequenceAborted {
+                logging::emit(&SentinelEvent::KillSequenceAborted {
                     reason: "No eligible kill candidates found!".to_string(),
-                }
-                .emit();
+                });
                 break;
             }
         }
@@ -122,10 +119,9 @@ impl Killer {
         let entries = match fs::read_dir("/proc") {
             Ok(iter) => iter,
             Err(e) => {
-                SentinelEvent::KillSequenceAborted {
+                logging::emit(&SentinelEvent::KillSequenceAborted {
                     reason: format!("Failed to read /proc: {}", e),
-                }
-                .emit();
+                });
                 return None;
             }
         };
@@ -350,17 +346,15 @@ impl Killer {
         // 1. Send SIGTERM
         if let Err(e) = kill(nix_pid, Signal::SIGTERM) {
             if e == nix::errno::Errno::ESRCH {
-                SentinelEvent::KillCandidateIgnored {
+                logging::emit(&SentinelEvent::KillCandidateIgnored {
                     pid: victim.pid,
                     reason: "ESRCH (Already gone)".to_string(),
-                }
-                .emit();
+                });
                 return Some(victim.rss);
             }
-            SentinelEvent::KillSequenceAborted {
+            logging::emit(&SentinelEvent::KillSequenceAborted {
                 reason: format!("Failed to send SIGTERM to {}: {}", victim.pid, e),
-            }
-            .emit();
+            });
             return None;
         }
 
@@ -376,11 +370,10 @@ impl Killer {
                     if let Some(start_time_str) = after_comm.split_whitespace().nth(19) {
                         if let Ok(new_st) = start_time_str.parse::<u64>() {
                             if new_st != victim.start_time {
-                                SentinelEvent::KillCandidateIgnored {
+                                logging::emit(&SentinelEvent::KillCandidateIgnored {
                                     pid: victim.pid,
                                     reason: "PID Reuse detected during wait".to_string(),
-                                }
-                                .emit();
+                                });
                                 return Some(victim.rss);
                             }
                         }
@@ -389,32 +382,29 @@ impl Killer {
             }
         } else {
             // Process GONE
-            SentinelEvent::KillExecuted {
+            logging::emit(&SentinelEvent::KillExecuted {
                 pid: victim.pid,
                 process_name: name.to_string(),
                 strategy: "SIGTERM".to_string(),
                 rss_freed: victim.rss,
-            }
-            .emit();
+            });
             return Some(victim.rss);
         }
 
         // 3. SIGKILL
         if let Err(e) = kill(nix_pid, Signal::SIGKILL) {
-            SentinelEvent::KillSequenceAborted {
+            logging::emit(&SentinelEvent::KillSequenceAborted {
                 reason: format!("Failed to send SIGKILL to {}: {}", victim.pid, e),
-            }
-            .emit();
+            });
             return None;
         }
 
-        SentinelEvent::KillExecuted {
+        logging::emit(&SentinelEvent::KillExecuted {
             pid: victim.pid,
             process_name: name.to_string(),
             strategy: "SIGKILL".to_string(),
             rss_freed: victim.rss,
-        }
-        .emit();
+        });
         Some(victim.rss)
     }
 }

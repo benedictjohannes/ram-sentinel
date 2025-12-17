@@ -1,5 +1,6 @@
 use crate::config_error::ConfigError;
-use crate::logging::{LogLevel, SentinelEvent};
+use crate::events::{LogLevel, SentinelEvent};
+use crate::logging;
 use crate::psi;
 use crate::utils::parse_size;
 use regex::Regex;
@@ -230,11 +231,10 @@ impl Config {
             }
         }
 
-        SentinelEvent::Message {
+        logging::emit(&SentinelEvent::Message {
             level: LogLevel::Info,
             text: "No configuration file found. Loading sane defaults.".to_string(),
-        }
-        .emit();
+        });
         Ok(Self::sane_defaults())
     }
 

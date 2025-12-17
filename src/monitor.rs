@@ -1,6 +1,7 @@
 use crate::{
     config::{MemoryConfigParsed, RuntimeContext},
-    logging::{LogLevel, SentinelEvent, get_log_level},
+    events::{LogLevel, SentinelEvent},
+    logging::{self, get_log_level},
     psi::read_psi_total,
 };
 use std::time::Instant;
@@ -196,20 +197,19 @@ impl Monitor {
 
         // emit heartbeat
         if get_log_level() >= LogLevel::Debug {
-            SentinelEvent::Monitor {
+            logging::emit(&SentinelEvent::Monitor {
                 memory_available_bytes: self.ram_bytes,
                 memory_available_percent: self.ram_percent,
                 swap_free_bytes: self.swap_bytes,
                 swap_free_percent: self.swap_percent,
                 psi_pressure: self.psi_pressure,
-            }
-            .emit();
+            });
         }
 
         // Final Decision (Warnings)
         if let Some(event) = pending_warn {
             if self.can_warn(ctx) {
-                event.emit();
+                logging::emit(&event);
                 self.last_warn_time = Some(now);
                 return MonitorStatus::Warn;
             }
