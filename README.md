@@ -179,4 +179,4 @@ killStrategy: highestOomScore
 2.  **Identity Verification:** Before sending the final `SIGKILL`, the sentinel verifies that the PID's `create_time` matches the victim it selected 3 seconds ago. This prevents the "PID Reuse" race condition where a guardian accidentally kills a brand new process that grabbed the dead victim's PID.
 3.  **Strict Override:** Configuration follows a "Manual Override" logic. If you set a specific Byte limit (`500MB`), the vague Percentage limit (`5%`) is ignored. You get exactly what you ask for.
 
-> `ram-sentinel` is heavily inspired by the excellent [`earlyoom`](https://github.com/rfjakob/earlyoom), implementing many features I wished it had (like surgical process targeting and fine grained tuning).For a deeper dive into the architectural decisions, see [GEMINI.md](GEMINI.md).
+> `ram-sentinel` is heavily inspired by the excellent [`earlyoom`](https://github.com/rfjakob/earlyoom), implementing many features I wished it had (like surgical process targeting and fine grained tuning). For a deeper dive into the architectural decisions, see [GEMINI.md](GEMINI.md).
