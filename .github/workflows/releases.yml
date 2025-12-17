@@ -9,20 +9,17 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  test_and_build:
-    name: Test & Build (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest]
-        toolchain: [stable]
+  build_and_release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install system dependencies (Linux)
-        if: runner.os == 'Linux'
+      - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y libdbus-1-dev pkg-config
@@ -30,7 +27,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: ${{ matrix.toolchain }}
+          toolchain: stable
 
       - name: Check Cargo.lock consistency
         run: cargo check --locked
@@ -38,27 +35,19 @@ jobs:
       - name: Build release binary
         run: cargo build --verbose --release
 
-      - name: Archive artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: ram-sentinel-${{ matrix.os }}
-          path: target/release/ram-sentinel*
+      - name: Rename binary
+        run: mv target/release/ram-sentinel ram-sentinel-linux-amd64
 
-  publish_to_crates_io:
-    name: Publish to Crates.io
-    needs: [test_and_build]
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
         with:
-          toolchain: stable
+          files: ram-sentinel-linux-amd64
+          generate_release_notes: true
+          draft: endsWith(github.ref, 'draft')
 
       - name: Publish to Crates.io
+        if: startsWith(github.ref, 'refs/tags/v') && !endsWith(github.ref, 'draft')
         uses: actions-rs/cargo@v1
         with:
           command: publish
