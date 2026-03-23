@@ -79,39 +79,15 @@ systemctl --user enable --now ram-sentinel
 
 ### 🌟 Recommended Configuration
 
-*Use this if you want the "Anti-Freeze" experience.* This enables the PSI monitor to kill runaway processes when the system starts thrashing (lagging), even if you technically have free RAM.
+For the best "Anti-Freeze" experience, we recommend using the provided [config.example.toml](config.example.toml) as a starting point. It includes pre-tuned settings for:
+- **Surgical Targeting**: Kills browser renderers and dev tools before touching your IDE.
+- **PSI (Pressure Stall Information)**: Acts when the system starts stuttering, preventing hard lockups.
+- **Ignore List**: Protects your desktop environment and essential background services.
 
-```toml
-[ram]
-warn_min_free_bytes = "500M"
-# Safety net: Kill if RAM drops below 5%
-kill_min_free_percent = 5.0 
-
-[psi]
-# Warn when system feels "heavy" (stuttering)
-warn_max_percent = 40.0
-# EMERGENCY: Kill when system freezes (mouse lag/thrashing)
-kill_max_percent = 85.0
-amount_to_free = "400M"
-
-check_interval_ms = 1000
-warn_reset_ms = 30000
-sigterm_wait_ms = 2500
-ignore_names = [
-  # Broad matches to protect your shell/environment
-  "kwin",
-  "plasma",
-  "gnome-shell",
-  "sshd"
-]
-kill_targets = [
-  # TIER 1 PRIORITY: The Expendables
-  # These are killed FIRST.
-  "type=renderer",       # Chrome/Electron tabs
-  "-contentproc",        # Firefox tabs
-  "^/usr/bin/node"      # Strict prefix match for processes you want to target first, e.g. for local node scripts
-]
-kill_strategy = "highest_oom_score"
+To use it:
+```bash
+cp config.example.toml ~/.config/ram-sentinel.toml
+# edit to your liking
 ```
 
 ### Sane Defaults 🛡️
@@ -139,54 +115,18 @@ kill_strategy = "highest_oom_score"
 
 ### 📖 Full Configuration Reference
 
-Detailed explanation of every available option.
+For a detailed explanation of every available option and advanced targeting examples, please refer to the fully commented **[config.example.toml](config.example.toml)**.
 
-```toml
-# --- RAM LIMITS ---
-# Triggers if Available RAM falls below these values.
-# NOTE: If 'bytes' is set, it OVERRIDES 'percent'.
-[ram]
-warn_min_free_bytes = "1G"      # Warn if < 1GB free
-warn_min_free_percent = 10.0  # (Ignored if bytes is set)
-kill_min_free_bytes = "250M"    # Kill if < 250MB free
-kill_min_free_percent = 5.0   # (Ignored if bytes is set)
+### 🔍 Validating your Configuration
 
-# --- SWAP LIMITS ---
-# Same logic as RAM.
-[swap]
-warn_min_free_percent = 20.0
-kill_min_free_percent = 5.0
+You can verify your configuration file (or the default one) using the `--check-config` flag. This will load the config, validate all values and regex patterns, and print the effective configuration that `ram-sentinel` will use.
 
-# --- PSI (PRESSURE STALL INFORMATION) ---
-# Requires Linux Kernel 4.20+ with CONFIG_PSI=y
-# "Pressure" = % of time tasks are stalled waiting for memory.
-[psi]
-warn_max_percent = 40.0      # Warn if system is stuttering (40% pressure)
-kill_max_percent = 90.0      # Kill if system is frozen (90% pressure)
-amount_to_free = "500M"        # If triggered, kill processes until 500MB is freed
+```bash
+# Check your default config
+ram-sentinel --check-config
 
-# --- TIMING ---
-check_interval_ms = 1000       # How often to poll system stats
-warn_reset_ms = 30000          # Don't spam notifications more than every 30s
-sigterm_wait_ms = 3000         # Wait 3s after SIGTERM before sending SIGKILL
-
-# --- TARGETING STRATEGY ---
-# 1. Regex: "/pattern/" matches Name or Command Line
-# 2. Prefix: "^string" matches START of Command Line
-# 3. Literal: "string" matches substring of Name
-kill_targets = [
-  "type=renderer",           # Priority 1: Browser tabs
-  "/npm start/",             # Priority 2: NPM scripts
-  "^/usr/bin/python"        # Priority 3: Python scripts
-]
-
-ignore_names = [
-  "^Xorg",                   # Never kill Xorg
-  "/wayland/"                # Never kill Wayland compositors
-]
-
-# Strategies: 'highest_oom_score' (recommended) or 'largest_rss'
-kill_strategy = "highest_oom_score"
+# Check a specific config file
+ram-sentinel --config my-test-config.toml --check-config
 ```
 
 -----

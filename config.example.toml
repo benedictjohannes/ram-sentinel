@@ -1,0 +1,68 @@
+# RAM Sentinel Configuration Example 🛡️
+# This file showcases the recommended settings for power users and developers.
+# Save this to ~/.config/ram-sentinel.toml
+
+# --- OPERATIONAL SETTINGS ---
+check_interval_ms = 1000        # Poll system stats every 1s
+warn_reset_ms = 30000           # Don't spam notifications more than every 30s
+sigterm_wait_ms = 3000          # Wait 3s after SIGTERM before sending SIGKILL
+
+# --- TARGETING STRATEGY ---
+# ram-sentinel uses "Surgical Targeting" to kill low-value processes first.
+# Priority: Higher in the list = Killed First.
+
+# Matching Rules:
+# 1. Regex: "/pattern/" matches Name or Command Line
+# 2. Prefix: "^string" matches START of Command Line
+# 3. Substring: "string" matches Name or Command Line
+
+kill_targets = [
+  # TIER 1: The Expendables (Kill these first)
+  "type=renderer",              # Chrome/Electron tabs
+  "-contentproc",               # Firefox tabs
+  
+  # TIER 2: Development tools that often leak
+  "/npm start/",                # NPM scripts
+  "/next-dev/",                 # Next.js dev server
+  "^/usr/bin/node",            # Literal node scripts
+  "^/usr/bin/python",          # Python scripts
+  
+  # TIER 3: General heavy hitters
+  "intellij",                   # Java-based IDEs
+]
+
+# Processes to NEVER kill (Prefix or Substring match)
+ignore_names = [
+  "kwin",                       # KDE Window Manager
+  "plasma",                     # KDE Desktop
+  "gnome-shell",                # GNOME Shell
+  "xorg",                       # Display Server
+  "wayland",                    # Display Server
+  "sshd",                       # Secure Shell
+  "ram-sentinel"                # Don't kill myself!
+]
+
+# Strategies: 'highest_oom_score' (recommended) or 'largest_rss'
+kill_strategy = "highest_oom_score"
+
+# --- RAM LIMITS ---
+# Triggers if Available RAM falls below these values.
+# NOTE: If 'bytes' is set, it OVERRIDES 'percent' for that metric.
+[ram]
+warn_min_free_bytes = "500MB"      # Warn when memory starts getting tight
+kill_min_free_percent = 5.0      # Safety net: Kill if RAM drops below 5%
+
+# --- SWAP LIMITS ---
+# Same logic as RAM.
+[swap]
+warn_min_free_percent = 20.0     # Warn when swap usage is high
+kill_min_free_percent = 5.0      # Kill when swap is almost exhausted
+
+# --- PSI (PRESSURE STALL INFORMATION) ---
+# "Pressure" = % of time tasks are stalled waiting for memory.
+# This is the "Anti-Freeze" mechanism. It acts when the system stutters,
+# even if you technically have free RAM (prevents thrashing).
+[psi]
+warn_max_percent = 40.0         # Warn if system is stuttering (40% pressure)
+kill_max_percent = 85.0         # EMERGENCY: Kill if system is frozen (85% pressure)
+amount_to_free = "500MB"        # If triggered, kill processes until 500MB is freed

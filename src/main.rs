@@ -57,6 +57,10 @@ struct Cli {
     /// Optional Path to print systemd user unit to. Defaults to stdout.
     #[arg(long, value_name = "FILE", num_args(0..=1), default_missing_value = "-")]
     print_systemd_user_unit: Option<PathBuf>,
+
+    /// Check the configuration for errors and print the effective configuration.
+    #[arg(long)]
+    check_config: bool,
 }
 
 fn handle_output(path_arg: Option<PathBuf>, content: &str) {
@@ -122,6 +126,22 @@ fn main() {
             .expect("FATAL: Failed to serialize default configuration");
         handle_output(args.print_config, &toml_content);
         return;
+    }
+    if args.check_config {
+        match Config::load_raw_validated(args.config.clone()) {
+            Ok(config) => {
+                let toml_content = toml::to_string(&config)
+                    .expect("FATAL: Failed to serialize validated configuration");
+                println!("Configuration is valid:");
+                println!("");
+                println!("{}", toml_content);
+                exit(0);
+            }
+            Err(e) => {
+                eprintln!("Configuration Error: {}", e);
+                exit(e.exit_code());
+            }
+        }
     }
 
     let ctx = match Config::load(args.config) {

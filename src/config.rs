@@ -162,18 +162,7 @@ impl Pattern {
 
 impl Config {
     pub fn load(cli_config_path: Option<PathBuf>) -> Result<RuntimeContext, ConfigError> {
-        let mut config = match cli_config_path {
-            Some(path) => {
-                if !path.exists() {
-                    // Was Exit code 2
-                    return Err(ConfigError::ConfigFileNotFound(path));
-                }
-                Self::parse_file(&path)?
-            }
-            None => Self::find_and_load_config()?,
-        };
-
-        config.validate()?;
+        let config = Self::load_raw_validated(cli_config_path)?;
 
         // Optimization: Compile Regex patterns
         let ignore_names_regex = compile_patterns(&config.ignore_names, "ignore_names")?;
@@ -214,6 +203,21 @@ impl Config {
             ignore_names_regex,
             kill_targets_regex,
         })
+    }
+
+    pub fn load_raw_validated(cli_config_path: Option<PathBuf>) -> Result<Config, ConfigError> {
+        let mut config = match cli_config_path {
+            Some(path) => {
+                if !path.exists() {
+                    return Err(ConfigError::ConfigFileNotFound(path));
+                }
+                Self::parse_file(&path)?
+            }
+            None => Self::find_and_load_config()?,
+        };
+
+        config.validate()?;
+        Ok(config)
     }
 
     fn find_and_load_config() -> Result<Config, ConfigError> {
@@ -281,6 +285,25 @@ impl Config {
         if psi_empty && ram_empty && swap_empty {
             return Err(ConfigError::EffectiveEmpty);
         }
+
+        // Detailed Validation
+        if let Some(r) = self.ram.as_ref() {
+            MemoryConfigParsed::try_from_config(r.clone())?;
+        }
+
+        if let Some(s) = self.swap.as_ref() {
+            MemoryConfigParsed::try_from_config(s.clone())?;
+        }
+
+        if let Some(p) = self.psi.as_ref() {
+            psi::PsiConfigParsed::try_from_config(p.clone(), self.check_interval_ms)
+                .map_err(|e| ConfigError::PsiConfig(e.to_string()))?;
+        }
+
+        // Validate Patterns
+        compile_patterns(&self.ignore_names, "ignore_names")?;
+        compile_patterns(&self.kill_targets, "kill_targets")?;
+
         if psi_empty {
             self.psi = None;
         }
