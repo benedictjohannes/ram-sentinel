@@ -24,7 +24,7 @@ pub struct Config {
     pub sigterm_wait_ms: u64,
 
     // Targeting Logic
-    #[serde(default)]
+    #[serde(default = "default_ignore_names")]
     pub ignore_names: Vec<String>,
 
     #[serde(default = "default_kill_targets")]
@@ -32,6 +32,9 @@ pub struct Config {
 
     #[serde(default = "default_strategy")]
     pub kill_strategy: KillStrategy,
+
+    #[serde(default = "default_allow_kill_outside_targets")]
+    pub allow_kill_outside_targets: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -126,6 +129,12 @@ fn default_strategy() -> KillStrategy {
 fn default_kill_targets() -> Vec<String> {
     vec!["type=renderer".to_string(), "-contentproc".to_string()]
 }
+fn default_allow_kill_outside_targets() -> bool {
+    false
+}
+fn default_ignore_names() -> Vec<String> {
+    vec!["ram-sentinel".to_string()]
+}
 
 #[derive(Debug)]
 pub struct RuntimeContext {
@@ -141,6 +150,7 @@ pub struct RuntimeContext {
 
     pub ignore_names_regex: Vec<TargetPattern>,
     pub kill_targets_regex: Vec<TargetPattern>,
+    pub allow_kill_outside_targets: bool,
 }
 
 #[derive(Debug)]
@@ -208,6 +218,7 @@ impl Config {
             kill_strategy: config.kill_strategy,
             ignore_names_regex,
             kill_targets_regex,
+            allow_kill_outside_targets: config.allow_kill_outside_targets,
         })
     }
 
@@ -274,9 +285,10 @@ impl Config {
             check_interval_ms: default_interval(),
             warn_reset_ms: warn_interval(),
             sigterm_wait_ms: sigterm_wait_ms(),
-            ignore_names: vec![],
+            ignore_names: default_ignore_names(),
             kill_targets: default_kill_targets(),
             kill_strategy: default_strategy(),
+            allow_kill_outside_targets: default_allow_kill_outside_targets(),
         }
     }
 

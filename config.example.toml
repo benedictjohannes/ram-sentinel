@@ -19,7 +19,6 @@ sigterm_wait_ms = 3000          # Wait 3s after SIGTERM before sending SIGKILL
 #    Matches cgroup v2 path FIRST, then cmdline.
 #    The CGROUP_PATTERN is the same with Matching Rule #1-3.
 #    Note that the space is mandatory and the match strips the "0::" prefix.
-
 kill_targets = [
   # TIER 1: The Expendables (Kill these first)
   # Target by cgroup + cmdline (Efficient!)
@@ -36,12 +35,16 @@ kill_targets = [
   "@[/app.slice/]@ intellij",     # Target IntelliJ only if it's in app.slice
   "intellij",                   # Catch-all for other slices
 ]
+# If true, allow killing processes that don't match 'kill_targets' when it's populated.
+# If false (default), only processes matching 'kill_targets' will be considered.
+# This prevents accidentally killing important applications not in the list.
+allow_kill_outside_targets = false
 
-# Processes to NEVER kill (Prefix or Substring match)
+# Processes to NEVER kill (Same matching rules as kill_targets)
 ignore_names = [
   "@[session.slice]@ /./",      # Protect core desktop services
   "sshd",                       # Secure Shell
-  "ram-sentinel"                # Don't kill myself!
+  "ram-sentinel"                # Don't kill self
 ]
 
 # Strategies: 'highest_oom_score' (recommended) or 'largest_rss'

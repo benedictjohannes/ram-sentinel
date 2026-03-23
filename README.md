@@ -109,7 +109,8 @@ kill_targets = [
   "type=renderer",
   "-contentproc"
 ]
-ignore_names = []
+allow_kill_outside_targets = false
+ignore_names = ["ram-sentinel"]
 kill_strategy = "highest_oom_score"
 ```
 

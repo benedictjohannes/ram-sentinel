@@ -260,11 +260,10 @@ impl Killer {
                     }
                 }
 
-                // Targeting Strategy 1:
-                // If the process didn't match any explicit targets (match_index == usize::MAX),
-                // but the user has defined explicit targets, we skip this process.
-                // This ensures non kill_targets are only targeted if NO targets are defined.
-                if match_index == usize::MAX && !ctx.kill_targets_regex.is_empty() {
+                if match_index == usize::MAX
+                    && !ctx.kill_targets_regex.is_empty()
+                    && !ctx.allow_kill_outside_targets
+                {
                     continue;
                 }
 
