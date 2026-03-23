@@ -1,75 +1,76 @@
 # RAM Sentinel Configuration Example 🛡️
-# This file showcases the recommended settings for power users and developers.
+# This file showcases the recommended settings desktop users.
 # Save this to ~/.config/ram-sentinel.toml
 
 # --- OPERATIONAL SETTINGS ---
-check_interval_ms = 1000        # Poll system stats every 1s
-warn_reset_ms = 30000           # Don't spam notifications more than every 30s
-sigterm_wait_ms = 3000          # Wait 3s after SIGTERM before sending SIGKILL
+check_interval_ms = 1000        # Poll system stats every 1s (balanced response/CPU)
+warn_reset_ms = 60000           # Don't spam notifications more than every 60s
+sigterm_wait_ms = 5000          # Give apps 5s to save/close before "The Hammer" (SIGKILL)
 
-# --- TARGETING STRATEGY ---
-# ram-sentinel uses "Surgical Targeting" to kill low-value processes first.
-# Priority: Higher in the list = Killed First.
+# --- SURGICAL TARGETING ---
+# ram-sentinel uses a "Tiered Hit List" strategy.
+# Priority: What gets listed first, gets killed first.
 
 # Matching Rules:
 # 1. Regex: "/pattern/" matches Name or Command Line
 # 2. Prefix: "^string" matches START of Command Line
 # 3. Substring: "string" matches Name or Command Line
 # 4. Scoped (Dual-Layer): "@[CGROUP_PATTERN]@ CMDLINE_PATTERN"
-#    Matches cgroup v2 path FIRST, then cmdline.
-#    The CGROUP_PATTERN is the same with Matching Rule #1-3.
-#    Note that the space is mandatory and the match strips the "0::" prefix.
+#    If specified, matches cgroup v2 path FIRST, then cmdline.
+
 kill_targets = [
-  # TIER 1: The Expendables (Kill these first)
-  # Target by cgroup + cmdline (Efficient!)
-  "@[/Chromium|chrome|edge/]@ type=renderer",  # Chromium renderers
-  "-contentproc",                             # Firefox tabs (legacy style)
+  # Browser tabs
+  "@[/Chromium|chrome|edge/]@ type=renderer",  # Chromium renderers: kill some tabs, not whole browser
+  "-contentproc",                              # Firefox tabs
   
-  # TIER 2: Development tools that often leak
-  "/npm start/",                # NPM scripts
-  "/next-dev/",                 # Next.js dev server
-  "^/usr/bin/node",            # Literal node scripts
-  "^/usr/bin/python",          # Python scripts
+  # Development servers / scripts
+  "npm run start",              # NPM scripts (Substring)
   
-  # TIER 3: General heavy hitters
-  "@[/app.slice/]@ intellij",     # Target IntelliJ only if it's in app.slice
-  "intellij",                   # Catch-all for other slices
+  # Heavy Desktop Apps
+  "slack",                      # Electron app (Substring)
+  "discord",                    # Electron app (Substring)
+  "@[/app.slice/]@ intellij",   # Target IntelliJ only if it's in app.slice
 ]
+
 # If true, allow killing processes that don't match 'kill_targets' when it's populated.
-# If false (default), only processes matching 'kill_targets' will be considered.
-# This prevents accidentally killing important applications not in the list.
+# Set to false to ensure only kill_targets are ever touched.
 allow_kill_outside_targets = false
 
+# --- GUARDIAN PROTECTION ---
 # Processes to NEVER kill (Same matching rules as kill_targets)
 ignore_names = [
-  "@[session.slice]@ /./",      # Protect core desktop services
-  "sshd",                       # Secure Shell
-  "ram-sentinel"                # Don't kill self
+  "@[/session.slice/]@ /./",    # PROTECT: All core desktop and session services
+  "sshd",                       # PROTECT: Don't lock yourself out of a server!
+  "ram-sentinel"                # PROTECT: Don't kill self
 ]
 
-# Strategies: 'highest_oom_score' (recommended) or 'largest_rss'
+# Sorting within a kill target: 'highest_oom_score' (recommended) or 'largest_rss'
+# 'highest_oom_score' uses the kernel's own "low-value" ranking.
 kill_strategy = "highest_oom_score"
 
-# --- RAM LIMITS ---
-# Triggers if Available RAM falls below these values.
-# NOTE: If 'bytes' is set, it OVERRIDES 'percent' for that metric.
+# --- RAM & SWAP TRIGGER SYSTEM ---
+# Triggers if Available RAM/Swap falls below these values.
+# LOGIC: Explicit 'bytes' (e.g. "1GB") always OVERRIDDES 'percent' (e.g. 5.0).
+# Leave one as None/commented to use the other.
+
 [ram]
-warn_min_free_bytes   = "1GB"    # Warn when memory starts getting tight
-kill_min_free_bytes   = "500MB"  # Warn when memory starts getting tight
-warn_min_free_percent = 5.0      # Safety net: Kill if RAM drops below 5%
-kill_min_free_percent = 2.0      # Safety net: Kill if RAM drops below 5%
+warn_min_free_bytes   = "1500MB" # Signal to start saving your work
+kill_min_free_bytes   = "800MB"  # Surgical strike to prevent freezing
+# warn_min_free_percent = 10.0
+# kill_min_free_percent = 5.0
 
-# --- SWAP LIMITS ---
-# Same logic as RAM.
 [swap]
-warn_min_free_percent = 20.0     # Warn when swap usage is high
-kill_min_free_percent = 5.0      # Kill when swap is almost exhausted
+# ZRAM USERS: Since zram IS RAM, keep these tightly tuned to the capacity 
+# of your zram device. If zram is full (even if RAM is free), your 
+# system will "file thrash" and lag heavily.
+warn_min_free_percent = 25.0     # Warn when the "compression safety net" is filling
+kill_min_free_percent = 10.0     # Strike before the cache is evicted
 
-# --- PSI (PRESSURE STALL INFORMATION) ---
-# "Pressure" = % of time tasks are stalled waiting for memory.
-# This is the "Anti-Freeze" mechanism. It acts when the system stutters,
-# even if you technically have free RAM (prevents thrashing).
+# --- ANTI-FREEZE (PSI - PRESSURE STALL INFORMATION) ---
+# Pressure = % of time CPU/Tasks are stalled waiting for memory.
+# This prevents "The Deadlock" where the system is too busy for the CPU 
+# to even trigger the RAM/Swap limits. HIGHLY RECOMMENDED.
 [psi]
-warn_max_percent = 40.0         # Warn if system is stuttering (40% pressure)
-kill_max_percent = 85.0         # EMERGENCY: Kill if system is frozen (85% pressure)
-amount_to_free = "500MB"        # If triggered, kill processes until 500MB is freed
+warn_max_percent = 40.0         # "Stuttering" detected (Yellow alert)
+kill_max_percent = 85.0         # "Lockup Imminent" (Red alert)
+amount_to_free = "1GB"          # If psi triggers, kill until this amount is freed
