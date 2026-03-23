@@ -69,19 +69,24 @@ fn handle_output(path_arg: Option<PathBuf>, content: &str) {
         if path.to_string_lossy() == "-" {
             println!("{}", content);
         } else {
+            let msg = format!("Writing content to file: {:?}", path);
             logging::emit(&SentinelEvent::Message {
                 level: LogLevel::Debug,
-                text: format!("Writing content to file: {:?}", path),
+                text: &msg,
             });
             match fs::File::create(&path).and_then(|mut file| file.write_all(content.as_bytes())) {
-                Ok(_) => logging::emit(&SentinelEvent::Message {
-                    level: LogLevel::Debug,
-                    text: format!("Successfully wrote to {:?}", path),
-                }),
+                Ok(_) => {
+                    let msg = format!("Successfully wrote to {:?}", path);
+                    logging::emit(&SentinelEvent::Message {
+                        level: LogLevel::Debug,
+                        text: &msg,
+                    })
+                }
                 Err(e) => {
+                    let msg = format!("Error writing to file {:?}: {}", path, e);
                     logging::emit(&SentinelEvent::Message {
                         level: LogLevel::Error,
-                        text: format!("Error writing to file {:?}: {}", path, e),
+                        text: &msg,
                     });
                     exit(1);
                 }
@@ -101,15 +106,17 @@ fn main() {
     unsafe {
         let handler = SigHandler::Handler(handle_shutdown_signal);
         if let Err(e) = signal(Signal::SIGTERM, handler) {
+            let msg = format!("Failed to register SIGTERM handler: {}", e);
             logging::emit(&SentinelEvent::Message {
                 level: LogLevel::Error,
-                text: format!("Failed to register SIGTERM handler: {}", e),
+                text: &msg,
             });
         }
         if let Err(e) = signal(Signal::SIGINT, handler) {
+            let msg = format!("Failed to register SIGINT handler: {}", e);
             logging::emit(&SentinelEvent::Message {
                 level: LogLevel::Error,
-                text: format!("Failed to register SIGINT handler: {}", e),
+                text: &msg,
             });
         }
     }
@@ -147,9 +154,10 @@ fn main() {
     let ctx = match Config::load(args.config) {
         Ok(c) => c,
         Err(e) => {
+            let msg = format!("Configuration Error: {}", e);
             logging::emit(&SentinelEvent::Message {
                 level: LogLevel::Error,
-                text: format!("Configuration Error: {}", e),
+                text: &msg,
             });
             exit(e.exit_code());
         }
@@ -176,7 +184,7 @@ fn run_loop(ctx: RuntimeContext, no_kill: bool) {
                 if no_kill {
                     logging::emit(&SentinelEvent::Message {
                         level: LogLevel::Info,
-                        text: "--no-kill active. Skipping kill sequence.".to_string(),
+                        text: "--no-kill active. Skipping kill sequence.",
                     });
                 } else {
                     if let SentinelEvent::KillTriggered { amount_needed, .. } = &event {
@@ -184,14 +192,13 @@ fn run_loop(ctx: RuntimeContext, no_kill: bool) {
                             killer.kill_sequence(&ctx, Some(needed));
                         } else {
                             logging::emit(&SentinelEvent::KillSequenceAborted {
-                                reason: "Kill triggered but amount_needed is None/Zero".to_string(),
+                                reason: "Kill triggered but amount_needed is None/Zero",
                             });
                         }
                     } else {
                         logging::emit(&SentinelEvent::Message {
                             level: LogLevel::Error,
-                            text: "Monitor returned non-KillTriggered event in Kill status"
-                                .to_string(),
+                            text: "Monitor returned non-KillTriggered event in Kill status",
                         });
                     }
                 }
@@ -202,6 +209,6 @@ fn run_loop(ctx: RuntimeContext, no_kill: bool) {
 
     logging::emit(&SentinelEvent::Message {
         level: LogLevel::Info,
-        text: "Exiting ram-sentinel.".to_string(),
+        text: "Exiting ram-sentinel.",
     });
 }

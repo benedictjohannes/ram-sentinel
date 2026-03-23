@@ -21,8 +21,8 @@ pub struct Monitor {
 
 pub enum MonitorStatus {
     Normal,
-    Warn,                // Event emitted internally
-    Kill(SentinelEvent), // Main needs the event to decide/log (contains amount_needed)
+    Warn,                       // Event emitted internally
+    Kill(SentinelEvent<'static>), // Main needs the event to decide/log (contains amount_needed)
 }
 
 impl Monitor {
@@ -53,7 +53,7 @@ impl Monitor {
 
         // We use this to store a warning from a higher priority check.
         // It can be overridden ONLY by a Kill, never by another Warning.
-        let mut pending_warn: Option<SentinelEvent> = None;
+        let mut pending_warn: Option<SentinelEvent<'static>> = None;
 
         // Priority 1: RAM (Hard Limit)
         if let Some(ram_config) = &ctx.ram {
@@ -70,7 +70,7 @@ impl Monitor {
                 {
                     let amount_needed = calc_needed(ram_config, available, total);
                     return MonitorStatus::Kill(SentinelEvent::KillTriggered {
-                        trigger: "LowMemory".to_string(),
+                        trigger: "LowMemory",
                         observed_value: if type_str == "bytes" {
                             available as f64
                         } else {
@@ -112,7 +112,7 @@ impl Monitor {
                 {
                     let amount_needed = calc_needed(swap_config, free, total);
                     return MonitorStatus::Kill(SentinelEvent::KillTriggered {
-                        trigger: "LowSwap".to_string(),
+                        trigger: "LowSwap",
                         observed_value: if type_str == "bytes" {
                             free as f64
                         } else {
@@ -167,10 +167,10 @@ impl Monitor {
                             if pressure as f32 > kill_max {
                                 let amount = psi_config.amount_to_free.expect("validated");
                                 return MonitorStatus::Kill(SentinelEvent::KillTriggered {
-                                    trigger: "PsiPressure".to_string(),
+                                    trigger: "PsiPressure",
                                     observed_value: pressure,
                                     threshold_value: kill_max as f64,
-                                    threshold_type: "percent".to_string(),
+                                    threshold_type: "percent",
                                     amount_needed: Some(amount),
                                 });
                             }
@@ -237,18 +237,17 @@ fn check_kill(
     config: &MemoryConfigParsed,
     free_bytes: u64,
     free_percent: f32,
-) -> Option<(f64, String)> {
+) -> Option<(f64, &'static str)> {
     if let Some(limit) = config.kill_min_free_bytes {
         if free_bytes < limit {
-            return Some((limit as f64, "bytes".to_string()));
+            return Some((limit as f64, "bytes"));
         }
-        // Strict Priority: If bytes limit exists, ignore percent?
-        // Task said: "If a byte limit is set, the percentage limit is ignored".
+        // Strict Priority: If bytes limit exists, ignore percent.
         return None;
     }
     if let Some(limit_percent) = config.kill_min_free_percent {
         if free_percent < limit_percent {
-            return Some((limit_percent as f64, "percent".to_string()));
+            return Some((limit_percent as f64, "percent"));
         }
     }
     None
@@ -258,16 +257,16 @@ fn check_warn(
     config: &MemoryConfigParsed,
     free_bytes: u64,
     free_percent: f32,
-) -> Option<(f64, String)> {
+) -> Option<(f64, &'static str)> {
     if let Some(limit) = config.warn_min_free_bytes {
         if free_bytes < limit {
-            return Some((limit as f64, "bytes".to_string()));
+            return Some((limit as f64, "bytes"));
         }
         return None;
     }
     if let Some(limit_percent) = config.warn_min_free_percent {
         if free_percent < limit_percent {
-            return Some((limit_percent as f64, "percent".to_string()));
+            return Some((limit_percent as f64, "percent"));
         }
     }
     None

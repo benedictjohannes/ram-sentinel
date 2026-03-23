@@ -55,12 +55,12 @@ impl LogMode {
 
 #[derive(Serialize, Clone)]
 #[serde(tag = "message", rename_all = "snake_case")]
-pub enum SentinelEvent {
+pub enum SentinelEvent<'a> {
     // Generic Message Wrapper
     Message {
         #[serde(skip)] // We don't need "level" twice in JSON (it's in the root)
         level: LogLevel,
-        text: String,
+        text: &'a str,
     },
 
     Startup {
@@ -76,13 +76,13 @@ pub enum SentinelEvent {
     LowMemoryWarn {
         available_bytes: u64,
         available_percent: f64,
-        threshold_type: String,
+        threshold_type: &'a str,
         threshold_value: f64,
     },
     LowSwapWarn {
         free_bytes: u64,
         free_percent: f64,
-        threshold_type: String,
+        threshold_type: &'a str,
         threshold_value: f64,
     },
     PsiPressureWarn {
@@ -90,36 +90,36 @@ pub enum SentinelEvent {
         threshold: f64,
     },
     KillTriggered {
-        trigger: String,
+        trigger: &'a str,
         observed_value: f64,
         threshold_value: f64,
-        threshold_type: String,
+        threshold_type: &'a str,
         amount_needed: Option<u64>,
     },
     KillCandidateSelected {
         pid: u32,
-        process_name: String,
+        process_name: &'a str,
         score: u64,
         rss: u64,
         match_index: usize,
     },
     KillExecuted {
         pid: u32,
-        process_name: String,
-        strategy: String,
+        process_name: &'a str,
+        strategy: &'a str,
         rss_freed: u64,
     },
     KillSequenceAborted {
-        reason: String,
+        reason: &'a str,
     },
     KillCandidateIgnored {
         pid: u32,
-        reason: String,
+        reason: &'a str,
     },
 }
 
 // --- Display Implementation (for Compact Mode) ---
-impl fmt::Display for SentinelEvent {
+impl fmt::Display for SentinelEvent<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SentinelEvent::Message { text, .. } => write!(f, "{}", text),
@@ -168,7 +168,7 @@ impl fmt::Display for SentinelEvent {
                 let avail_str = Byte::from_u64(*available_bytes)
                     .get_appropriate_unit(byte_unit::UnitType::Decimal)
                     .to_string();
-                if threshold_type == "bytes" {
+                if *threshold_type == "bytes" {
                     let thresh_str = Byte::from_u64(*threshold_value as u64)
                         .get_appropriate_unit(byte_unit::UnitType::Decimal)
                         .to_string();
@@ -194,7 +194,7 @@ impl fmt::Display for SentinelEvent {
                 let free_str = Byte::from_u64(*free_bytes)
                     .get_appropriate_unit(byte_unit::UnitType::Decimal)
                     .to_string();
-                if threshold_type == "bytes" {
+                if *threshold_type == "bytes" {
                     let thresh_str = Byte::from_u64(*threshold_value as u64)
                         .get_appropriate_unit(byte_unit::UnitType::Decimal)
                         .to_string();
@@ -228,14 +228,14 @@ impl fmt::Display for SentinelEvent {
                 threshold_type,
                 ..
             } => {
-                let observed_str = if threshold_type == "bytes" {
+                let observed_str = if *threshold_type == "bytes" {
                     Byte::from_u64(*observed_value as u64)
                         .get_appropriate_unit(byte_unit::UnitType::Decimal)
                         .to_string()
                 } else {
                     format!("{:.2}%", observed_value)
                 };
-                let limit_str = if threshold_type == "bytes" {
+                let limit_str = if *threshold_type == "bytes" {
                     Byte::from_u64(*threshold_value as u64)
                         .get_appropriate_unit(byte_unit::UnitType::Decimal)
                         .to_string()
@@ -289,7 +289,7 @@ impl fmt::Display for SentinelEvent {
     }
 }
 
-impl SentinelEvent {
+impl SentinelEvent<'_> {
     /// Determines the log severity of the current event.
     pub fn severity(&self) -> LogLevel {
         match self {

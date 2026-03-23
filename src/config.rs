@@ -232,7 +232,7 @@ impl Config {
 
         logging::emit(&SentinelEvent::Message {
             level: LogLevel::Info,
-            text: "No configuration file found. Loading sane defaults.".to_string(),
+            text: "No configuration file found. Loading sane defaults.",
         });
         Ok(Self::sane_defaults())
     }
