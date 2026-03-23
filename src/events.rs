@@ -51,6 +51,15 @@ impl LogMode {
     }
 }
 
+// --- Utility Functions ---
+
+fn format_bytes(bytes: u64) -> String {
+    format!(
+        "{:.2}",
+        Byte::from_u64(bytes).get_appropriate_unit(byte_unit::UnitType::Decimal)
+    )
+}
+
 // --- Event Definition ---
 
 #[derive(Serialize, Clone)]
@@ -135,16 +144,12 @@ impl fmt::Display for SentinelEvent<'_> {
                 psi_pressure,
             } => {
                 let avail_str = match memory_available_bytes {
-                    Some(b) => Byte::from_u64(*b)
-                        .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                        .to_string(),
+                    Some(b) => format_bytes(*b),
                     None => "N/A".to_string(),
                 };
 
                 let swap_str = match swap_free_bytes {
-                    Some(b) => Byte::from_u64(*b)
-                        .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                        .to_string(),
+                    Some(b) => format_bytes(*b),
                     None => "N/A".to_string(),
                 };
 
@@ -165,13 +170,9 @@ impl fmt::Display for SentinelEvent<'_> {
                 threshold_type,
                 threshold_value,
             } => {
-                let avail_str = Byte::from_u64(*available_bytes)
-                    .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                    .to_string();
+                let avail_str = format_bytes(*available_bytes);
                 if *threshold_type == "bytes" {
-                    let thresh_str = Byte::from_u64(*threshold_value as u64)
-                        .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                        .to_string();
+                    let thresh_str = format_bytes(*threshold_value as u64);
                     write!(
                         f,
                         "Low RAM: {} available (Limit: {})",
@@ -191,13 +192,9 @@ impl fmt::Display for SentinelEvent<'_> {
                 threshold_type,
                 threshold_value,
             } => {
-                let free_str = Byte::from_u64(*free_bytes)
-                    .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                    .to_string();
+                let free_str = format_bytes(*free_bytes);
                 if *threshold_type == "bytes" {
-                    let thresh_str = Byte::from_u64(*threshold_value as u64)
-                        .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                        .to_string();
+                    let thresh_str = format_bytes(*threshold_value as u64);
                     write!(
                         f,
                         "Low Swap: {} available (Limit: {})",
@@ -229,16 +226,12 @@ impl fmt::Display for SentinelEvent<'_> {
                 ..
             } => {
                 let observed_str = if *threshold_type == "bytes" {
-                    Byte::from_u64(*observed_value as u64)
-                        .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                        .to_string()
+                    format_bytes(*observed_value as u64)
                 } else {
                     format!("{:.2}%", observed_value)
                 };
                 let limit_str = if *threshold_type == "bytes" {
-                    Byte::from_u64(*threshold_value as u64)
-                        .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                        .to_string()
+                    format_bytes(*threshold_value as u64)
                 } else {
                     format!("{:.2}%", threshold_value)
                 };
@@ -255,9 +248,7 @@ impl fmt::Display for SentinelEvent<'_> {
                 rss,
                 ..
             } => {
-                let rss_str = Byte::from_u64(*rss)
-                    .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                    .to_string();
+                let rss_str = format_bytes(*rss);
                 write!(
                     f,
                     "Selected Target: {} (PID {}). Score: {}, RSS: {}",
@@ -270,9 +261,7 @@ impl fmt::Display for SentinelEvent<'_> {
                 strategy,
                 rss_freed,
             } => {
-                let rss_str = Byte::from_u64(*rss_freed)
-                    .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                    .to_string();
+                let rss_str = format_bytes(*rss_freed);
                 write!(
                     f,
                     "{} {} (PID {}). Freed: {}",
