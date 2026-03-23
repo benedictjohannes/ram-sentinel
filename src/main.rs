@@ -129,8 +129,8 @@ fn main() {
     }
     if args.print_config.is_some() {
         let defaults = Config::sane_defaults();
-        let toml_content = toml::to_string(&defaults)
-            .expect("FATAL: Failed to serialize default configuration");
+        let toml_content =
+            toml::to_string(&defaults).expect("FATAL: Failed to serialize default configuration");
         handle_output(args.print_config, &toml_content);
         return;
     }

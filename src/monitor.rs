@@ -21,7 +21,7 @@ pub struct Monitor {
 
 pub enum MonitorStatus {
     Normal,
-    Warn,                       // Event emitted internally
+    Warn,                         // Event emitted internally
     Kill(SentinelEvent<'static>), // Main needs the event to decide/log (contains amount_needed)
 }
 

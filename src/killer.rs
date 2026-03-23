@@ -129,7 +129,7 @@ impl Killer {
                     if self.failed_count < self.failed_pids.len() {
                         self.failed_pids[self.failed_count] = champion.pid;
                         self.failed_count += 1;
-                        
+
                         // We use the same reason allocation trick or just static strings to prevent allocations
                         logging::emit(&SentinelEvent::KillCandidateIgnored {
                             pid: champion.pid,
@@ -226,7 +226,7 @@ impl Killer {
                 // ---------------------------------------------------------
                 // Analyze Process (Cgroup & Cmdline Matching)
                 // ---------------------------------------------------------
-                
+
                 // RESET CACHES PER PID
                 self.cmdline_len = None;
                 self.cgroup_len = None;
@@ -380,7 +380,7 @@ impl Killer {
                         break;
                     }
                 }
-                
+
                 let Some(path) = v2_path else {
                     // Cgroup v2 hierarchy entry not found for this process.
                     return false;
