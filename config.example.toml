@@ -40,11 +40,6 @@ kill_targets = [
 # Processes to NEVER kill (Prefix or Substring match)
 ignore_names = [
   "@[session.slice]@ /./",      # Protect core desktop services
-  "kwin",                       # KDE Window Manager
-  "plasma",                     # KDE Desktop
-  "gnome-shell",                # GNOME Shell
-  "xorg",                       # Display Server
-  "wayland",                    # Display Server
   "sshd",                       # Secure Shell
   "ram-sentinel"                # Don't kill myself!
 ]
