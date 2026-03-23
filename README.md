@@ -10,7 +10,7 @@
 [![Crates.io](https://img.shields.io/crates/v/ram-sentinel)](https://crates.io/crates/ram-sentinel)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT) 
 
-**ram-sentinel** is a userspace OOM (Out-of-Memory) prevention daemon designed specifically for modern workstations. Unlike `earlyoom` or `nohang` which often act as blunt instruments (killing your heaviest app, usually your Browser or IDE), `ram-sentinel` uses **Surgical Cmdline Process Targeting** and **Pressure Stall Information (PSI)** to surgically remove specific low-value targets (like browser renderer tabs) before threatening your main workflow.
+**ram-sentinel** is a userspace OOM (Out-of-Memory) prevention daemon designed specifically for modern workstations. Unlike `earlyoom` or `nohang` which often act as blunt instruments (killing your heaviest app, usually your Browser or IDE), `ram-sentinel` uses **Surgical Process Targeting** by checking both *cmdline* and *cgroups* to surgically remove specific low-value targets (like browser renderer tabs) before threatening your main workflow. We also support preemptive system stutter prevention by leveraging **Pressure Stall Information (PSI)**.
 
 It runs as a standard user (`systemd --user`), requires no root privileges, and talks to you via desktop notifications. In my desktop, it takes up <5MB RSS.
 
@@ -20,7 +20,7 @@ If you are tired of your system freezing for 30 seconds before suddenly closing 
 
 | Feature         | Standard OOM Killer (systemd-oomd)                           | RAM Sentinel                                                               |
 | :-------------- | :----------------------------------------------------------- | :------------------------------------------------------------------------- |
-| **Targeting**   | Kills the parent process (Largest RSS). **Bye bye Browser.** | Targeted snipe. Kills `type=renderer` tabs first. **Keeps Browser alive.** |
+| **Targeting**   | Kills the parent process (Largest RSS). **Bye bye Browser.** | Targeted snipe. Kills `type=renderer` tabs first, or targets by **Cgroup v2** path. **Keeps Browser alive.** |
 | **Trigger**     | RAM Full (Too late) or blunt heuristic.                      | **PSI (Pressure)**: Acts when system *stutters*, not just when full.       |
 | **Safety**      | Can kill PID that was just reused (Race condition).          | **PID Identity Check**: Verifies process start time before killing.        |
 | **UX**          | Silent death.                                                | **Notifications**: Warns you *before* killing. Tells you *what* it killed. |
@@ -139,7 +139,7 @@ ram-sentinel --config my-test-config.toml --check-config
 2.  **Identity Verification:** Before sending the final `SIGKILL`, the sentinel verifies that the PID's `create_time` matches the victim it selected 3 seconds ago. This prevents the "PID Reuse" race condition where a guardian accidentally kills a brand new process that grabbed the dead victim's PID.
 3.  **Strict Override:** Configuration follows a "Manual Override" logic. If you set a specific Byte limit (`500MB`), the vague Percentage limit (`5%`) is ignored. You get exactly what you ask for.
 
-> `ram-sentinel` is heavily inspired by the excellent [`earlyoom`](https://github.com/rfjakob/earlyoom), implementing many features I wished it had (like surgical process targeting and fine grained tuning). For a deeper dive into the architectural decisions, see [GEMINI.md](GEMINI.md).
+> `ram-sentinel` is heavily inspired by the excellent [`earlyoom`](https://github.com/rfjakob/earlyoom) and the modern [`systemd-oomd`](https://www.freedesktop.org/software/systemd/man/systemd-oomd.service.html), implementing many features I wished they had (like surgical dual-layer targeting and fine grained userspace notification). For a deeper dive into the architectural decisions, see [GEMINI.md](GEMINI.md).
 
 ### Roadmap
 
@@ -162,8 +162,7 @@ This gives us rock-solid, real-world proof that ram-sentinel delivers on its pro
 
 Once the testing framework is battle-hardened, we'll expand beyond userspace:
 
-- Optional **root mode** as a proper system service.
-- New CLI flag: `--listen [socket-path]` for the userspace daemon - lets the root daemon push notifications to your user session (so desktop pop-ups still work seamlessly).
-- **Cgroup v2 awareness**: Layer surgical targeting on top of cgroup pressure metrics for better scoping in containerized/mixed setups. Inspired by tools like `systemd-oomd`—thanks for the blueprint!
+- **Root Mode**: Optional system service for managing all system processes.
+- **Notification Proxy**: Helper functionality to push notifications from the root daemon to user sessions.
 
 The goal? Make ram-sentinel the go-to guardian for all things Linux: desktops, workstations, and servers. Okay, well, maybe not Android 😖

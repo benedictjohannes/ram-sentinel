@@ -10,8 +10,14 @@ use std::thread;
 use std::time::Duration;
 
 pub struct Killer {
-    // Buffers for zero-allocation logic
-    read_buffer: Vec<u8>,
+    /// Dedicated buffer for cmdline to avoid repeated IO per pattern.
+    cmdline_cache: Vec<u8>,
+    cmdline_len: Option<usize>,
+    /// Dedicated buffer for cgroup to avoid repeated IO per pattern.
+    cgroup_cache: Vec<u8>,
+    cgroup_len: Option<usize>,
+    /// Scratch buffer for transient reads (stat, statm, oom_score, etc.).
+    scratch_buffer: Vec<u8>,
     path_buffer: String,
     name_buffer: String,
     /// Pre-allocated scratch space for dynamic abort/ignore reason strings.
@@ -44,7 +50,11 @@ impl Killer {
 
         Self {
             // Pre-allocate AND initialize to ensure pages are physically backed (prevent page faults during OOM)
-            read_buffer: vec![0u8; 256 * 1024],
+            cmdline_cache: vec![0u8; 128 * 1024],
+            cmdline_len: None,
+            cgroup_cache: vec![0u8; 8 * 1024],
+            cgroup_len: None,
+            scratch_buffer: vec![0u8; 64 * 1024],
             path_buffer: String::with_capacity(256),
             name_buffer: String::with_capacity(128),
             reason_buffer: String::with_capacity(256),
@@ -140,8 +150,8 @@ impl Killer {
 
     fn get_process_name(&mut self, pid: u32) {
         self.name_buffer.clear();
-        if self.read_file_into_buffer(pid, "comm").is_ok() {
-            if let Ok(s) = std::str::from_utf8(&self.read_buffer) {
+        if self.read_file_into_scratch(pid, "comm").is_ok() {
+            if let Ok(s) = std::str::from_utf8(&self.scratch_buffer) {
                 self.name_buffer.push_str(s.trim());
             } else {
                 self.name_buffer.push_str("unknown");
@@ -214,31 +224,17 @@ impl Killer {
                 }
 
                 // ---------------------------------------------------------
-                // Analyze Process
+                // Analyze Process (Cgroup & Cmdline Matching)
                 // ---------------------------------------------------------
-
-                // A. Determine Match Priority (Read cmdline)
-                if !matches!(self.read_file_into_buffer(pid, "cmdline"), Ok(n) if n > 0) {
-                    continue; // Skip empty cmdlines (kernel threads) or errors
-                }
-
-                // Replace nulls with spaces
-                for b in self.read_buffer.iter_mut() {
-                    if *b == 0 {
-                        *b = 32;
-                    }
-                }
-
-                // Strict allocation-free string ref
-                let cmdline_str = match std::str::from_utf8(&self.read_buffer) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
+                
+                // RESET CACHES PER PID
+                self.cmdline_len = None;
+                self.cgroup_len = None;
 
                 // Check Ignored
                 let mut ignored = false;
                 for pat in &ctx.ignore_names_regex {
-                    if pat.matches(cmdline_str) {
+                    if self.matches_target(pid, pat) {
                         ignored = true;
                         break;
                     }
@@ -250,14 +246,30 @@ impl Killer {
                 // Calculate Match Index
                 let mut match_index = usize::MAX;
                 for (idx, pat) in ctx.kill_targets_regex.iter().enumerate() {
-                    if pat.matches(cmdline_str) {
+                    // Optimized Skip: If we already have a champion that is better (lower match index)
+                    // than the current pattern index, we can stop checking patterns for this candidate.
+                    // Even if it matches this or later patterns, it will not be able to beat the current champion.
+                    if let Some(champ) = &current_champion {
+                        if idx >= champ.match_index {
+                            break;
+                        }
+                    }
+
+                    if self.matches_target(pid, pat) {
                         match_index = idx;
                         break;
                     }
                 }
 
-                // Priority Check: If we already have a champion with a better (lower) match index,
-                // and this candidate has a worse (higher) index, skip early.
+                // Targeting Strategy:
+                // 1. If the process didn't match any explicit targets (match_index == usize::MAX),
+                //    but the user has defined explicit targets, we skip this process.
+                //    This ensures general offending processes are only targeted if NO targets are defined.
+                if match_index == usize::MAX && !ctx.kill_targets_regex.is_empty() {
+                    continue;
+                }
+
+                // 2. If we already have a champion with a better (lower) match index, skip this candidate.
                 if let Some(champ) = &current_champion {
                     if match_index > champ.match_index {
                         continue;
@@ -266,8 +278,8 @@ impl Killer {
 
                 // B. Resource Check: Always read RSS to ensure it's captured while the process is live.
                 let mut rss = 0;
-                if self.read_file_into_buffer(pid, "statm").is_ok() {
-                    if let Ok(s) = std::str::from_utf8(&self.read_buffer) {
+                if self.read_file_into_scratch(pid, "statm").is_ok() {
+                    if let Ok(s) = std::str::from_utf8(&self.scratch_buffer) {
                         let mut parts = s.split_whitespace();
                         if let (Some(_total), Some(res)) = (parts.next(), parts.next()) {
                             if let Ok(pages) = res.parse::<u64>() {
@@ -282,10 +294,12 @@ impl Killer {
                     KillStrategy::LargestRss => rss,
                     KillStrategy::HighestOomScore => {
                         let mut s = 0;
-                        if self.read_file_into_buffer(pid, "oom_score").is_ok() {
-                            if let Ok(st) = std::str::from_utf8(&self.read_buffer) {
+                        if self.read_file_into_scratch(pid, "oom_score").is_ok() {
+                            if let Ok(st) = std::str::from_utf8(&self.scratch_buffer) {
                                 if let Ok(val) = st.trim().parse::<i32>() {
-                                    s = val as u64;
+                                    // oom_score can be negative (e.g. -1000 for exempt).
+                                    // Clamp to 0 to avoid massive wrap-around when casting to u64.
+                                    s = if val < 0 { 0 } else { val as u64 };
                                 }
                             }
                         }
@@ -307,8 +321,8 @@ impl Killer {
                 // Field 22 (starttime) in /proc/[pid]/stat. After splitting on ") " (which
                 // skips past the comm field), the remaining fields are 0-indexed as:
                 // 0=state, 1=ppid, ..., 19=starttime.
-                if self.read_file_into_buffer(pid, "stat").is_ok() {
-                    if let Ok(s) = std::str::from_utf8(&self.read_buffer) {
+                if self.read_file_into_scratch(pid, "stat").is_ok() {
+                    if let Ok(s) = std::str::from_utf8(&self.scratch_buffer) {
                         if let Some((_, after_comm)) = s.rsplit_once(") ") {
                             if let Some(start_time_str) = after_comm.split_whitespace().nth(19) {
                                 if let Ok(st) = start_time_str.parse::<u64>() {
@@ -330,36 +344,125 @@ impl Killer {
         current_champion
     }
 
-    fn read_file_into_buffer(&mut self, pid: u32, file: &str) -> std::io::Result<usize> {
+    fn matches_target(&mut self, pid: u32, target: &crate::config::TargetPattern) -> bool {
+        // 1. Cgroup Check (Short-circuit)
+        if let Some(cgroup_pat) = &target.cgroup {
+            if self.cgroup_len.is_none() {
+                // Lazy load cgroup
+                self.path_buffer.clear();
+                let _ = write!(self.path_buffer, "/proc/{}/cgroup", pid);
+                if let Ok(mut f) = File::open(&self.path_buffer) {
+                    let capacity = self.cgroup_cache.capacity();
+                    self.cgroup_cache.resize(capacity, 0);
+                    if let Ok(n) = f.read(&mut self.cgroup_cache) {
+                        self.cgroup_cache.truncate(n);
+                        self.cgroup_len = Some(n);
+                    } else {
+                        self.cgroup_cache.truncate(0);
+                        self.cgroup_len = Some(0);
+                    }
+                } else {
+                    self.cgroup_len = Some(0);
+                }
+            }
+
+            let len = self.cgroup_len.unwrap_or(0);
+            if len == 0 {
+                return false;
+            }
+
+            if let Ok(s) = std::str::from_utf8(&self.cgroup_cache[..len]) {
+                // Find the cgroup v2 unified hierarchy line (starts with "0::")
+                let mut v2_path = None;
+                for line in s.lines() {
+                    if let Some(p) = line.strip_prefix("0::") {
+                        // Found cgroup v2. Normalize empty path to "/" (root)
+                        v2_path = Some(if p.is_empty() { "/" } else { p });
+                        break;
+                    }
+                }
+                
+                let Some(path) = v2_path else {
+                    // Cgroup v2 hierarchy entry not found for this process.
+                    return false;
+                };
+
+                if !cgroup_pat.matches(path.trim()) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        // 2. Cmdline Check
+        if self.cmdline_len.is_none() {
+            // Lazy load cmdline
+            self.path_buffer.clear();
+            let _ = write!(self.path_buffer, "/proc/{}/cmdline", pid);
+            if let Ok(mut f) = File::open(&self.path_buffer) {
+                let capacity = self.cmdline_cache.capacity();
+                self.cmdline_cache.resize(capacity, 0);
+                if let Ok(n) = f.read(&mut self.cmdline_cache) {
+                    // Replace nulls with spaces for matching ONLY ONCE per process
+                    for b in self.cmdline_cache[..n].iter_mut() {
+                        if *b == 0 {
+                            *b = 32;
+                        }
+                    }
+                    self.cmdline_cache.truncate(n);
+                    self.cmdline_len = Some(n);
+                } else {
+                    self.cmdline_cache.truncate(0);
+                    self.cmdline_len = Some(0);
+                }
+            } else {
+                self.cmdline_len = Some(0);
+            }
+        }
+
+        let len = self.cmdline_len.unwrap_or(0);
+        if len == 0 {
+            return false;
+        }
+
+        if let Ok(s) = std::str::from_utf8(&self.cmdline_cache[..len]) {
+            return target.cmdline.matches(s);
+        }
+
+        false
+    }
+
+    fn read_file_into_scratch(&mut self, pid: u32, file: &str) -> std::io::Result<usize> {
         self.path_buffer.clear();
         write!(self.path_buffer, "/proc/{}/{}", pid, file).unwrap();
 
         let mut f = File::open(&self.path_buffer)?;
 
-        self.read_buffer.clear();
-        let capacity = self.read_buffer.capacity();
+        self.scratch_buffer.clear();
+        let capacity = self.scratch_buffer.capacity();
 
         // Safety: Replaced unsafe set_len with safe resize which writes zeroes.
-        self.read_buffer.resize(capacity, 0);
+        self.scratch_buffer.resize(capacity, 0);
 
-        let bytes_read = match f.read(&mut self.read_buffer) {
+        let bytes_read = match f.read(&mut self.scratch_buffer) {
             Ok(n) => n,
             Err(e) => {
-                self.read_buffer.clear();
+                self.scratch_buffer.clear();
                 return Err(e);
             }
         };
 
         // Truncate to exactly what was read so all subsequent slice access is correct.
-        self.read_buffer.truncate(bytes_read);
+        self.scratch_buffer.truncate(bytes_read);
 
         Ok(bytes_read)
     }
 
     fn verify_identity(&mut self, pid: u32, expected_st: u64) -> IdentityCheck {
-        match self.read_file_into_buffer(pid, "stat") {
+        match self.read_file_into_scratch(pid, "stat") {
             Ok(_) => {
-                let verified = match std::str::from_utf8(&self.read_buffer) {
+                let verified = match std::str::from_utf8(&self.scratch_buffer) {
                     Ok(s) => s
                         .rsplit_once(") ")
                         .and_then(|(_, after_comm)| after_comm.split_whitespace().nth(19))
@@ -400,7 +503,15 @@ impl Killer {
         match self.verify_identity(victim.pid, victim.start_time) {
             IdentityCheck::Match => {}
             IdentityCheck::PidReused => return KillOutcome::PidReused,
-            IdentityCheck::ProcessGone => return KillOutcome::Freed(victim.rss),
+            IdentityCheck::ProcessGone => {
+                logging::emit(&SentinelEvent::KillExecuted {
+                    pid: victim.pid,
+                    process_name: name,
+                    strategy: "Already exited",
+                    rss_freed: victim.rss,
+                });
+                return KillOutcome::Freed(victim.rss);
+            }
             IdentityCheck::Error => return KillOutcome::Failed,
         }
 
@@ -408,7 +519,7 @@ impl Killer {
         match kill(nix_pid, Signal::SIGTERM) {
             Ok(_) => {}
             Err(nix::errno::Errno::ESRCH) => {
-                // Process already gone — treat as success (memory freed).
+                // Process already gone — treat as success.
                 logging::emit(&SentinelEvent::KillExecuted {
                     pid: victim.pid,
                     process_name: name,
@@ -450,7 +561,7 @@ impl Killer {
         match kill(nix_pid, Signal::SIGKILL) {
             Ok(_) => {}
             Err(nix::errno::Errno::ESRCH) => {
-                // Process died between SIGTERM wait and SIGKILL — that's fine, memory is freed.
+                // Process died between SIGTERM wait and SIGKILL — that's fine.
                 logging::emit(&SentinelEvent::KillExecuted {
                     pid: victim.pid,
                     process_name: name,

@@ -54,6 +54,7 @@ The system identifies processes using a "Hit List" strategy.
 1.  **Regex:** If string is enclosed in `/.../` (e.g., `/firefox-bin/`), treat as Regex. Check against Name and Command Line.
 2.  **Prefix:** If string starts with `^` (e.g., `^/usr/lib/electron`), matches ONLY the start of the `cmd_line`.
 3.  **Substring:** Otherwise, simple substring match against Name or Command Line.
+4.  **Scoped (Dual-Layer):** `@[CGROUP_PATTERN]@ CMDLINE_PATTERN` matches the cgroup v2 path FIRST, then the command line.
 
 **Priority Queue:**
 * `killTargets` is an ordered list.

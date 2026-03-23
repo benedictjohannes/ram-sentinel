@@ -139,8 +139,14 @@ pub struct RuntimeContext {
 
     pub kill_strategy: KillStrategy,
 
-    pub ignore_names_regex: Vec<Pattern>,
-    pub kill_targets_regex: Vec<Pattern>,
+    pub ignore_names_regex: Vec<TargetPattern>,
+    pub kill_targets_regex: Vec<TargetPattern>,
+}
+
+#[derive(Debug)]
+pub struct TargetPattern {
+    pub cgroup: Option<Pattern>,
+    pub cmdline: Pattern,
 }
 
 #[derive(Debug)]
@@ -326,30 +332,63 @@ impl Config {
     }
 }
 
-fn compile_patterns(raw: &[String], field_name: &str) -> Result<Vec<Pattern>, ConfigError> {
+fn compile_patterns(raw: &[String], field_name: &str) -> Result<Vec<TargetPattern>, ConfigError> {
     let mut patterns = Vec::new();
-    for (i, s) in raw.iter().enumerate() {
-        if s.starts_with('/') && s.ends_with('/') && s.len() > 2 {
-            // Case 1: Regex
-            let regex_str = &s[1..s.len() - 1];
-            match Regex::new(regex_str) {
-                Ok(re) => patterns.push(Pattern::Regex(re)),
-                Err(e) => {
-                    return Err(ConfigError::RegexError(
-                        field_name.to_string(),
-                        i,
-                        s.clone(),
-                        e.to_string(),
-                    ));
-                }
+    for (i, raw_str) in raw.iter().enumerate() {
+        if raw_str.starts_with("@[") {
+            if let Some(end_bracket) = raw_str.find("]@ ") {
+                let cgroup_part = &raw_str[2..end_bracket];
+                let cmdline_part = &raw_str[end_bracket + 3..];
+
+                let cgroup_pat = parse_single_pattern(cgroup_part, field_name, i, raw_str)?;
+                let cmdline_pat = parse_single_pattern(cmdline_part, field_name, i, raw_str)?;
+
+                patterns.push(TargetPattern {
+                    cgroup: Some(cgroup_pat),
+                    cmdline: cmdline_pat,
+                });
+                continue;
+            } else {
+                return Err(ConfigError::FileParse(
+                    PathBuf::from("config"),
+                    format!(
+                        "Invalid pattern in {}: missing mandatory closing ']@ ' in '{}'",
+                        field_name, raw_str
+                    ),
+                ));
             }
-        } else if s.starts_with('^') && s.len() > 1 {
-            // Case 2: StartsWith
-            patterns.push(Pattern::StartsWith(s[1..].to_string()));
-        } else {
-            // Case 3: Literal
-            patterns.push(Pattern::Literal(s.clone()));
         }
+
+        // Fallback or explicit cmdline-only
+        let cmdline_pat = parse_single_pattern(raw_str, field_name, i, raw_str)?;
+        patterns.push(TargetPattern {
+            cgroup: None,
+            cmdline: cmdline_pat,
+        });
     }
     Ok(patterns)
+}
+
+fn parse_single_pattern(
+    s: &str,
+    field_name: &str,
+    index: usize,
+    raw_full: &str,
+) -> Result<Pattern, ConfigError> {
+    if s.starts_with('/') && s.ends_with('/') && s.len() > 2 {
+        let regex_str = &s[1..s.len() - 1];
+        match Regex::new(regex_str) {
+            Ok(re) => Ok(Pattern::Regex(re)),
+            Err(e) => Err(ConfigError::RegexError(
+                field_name.to_string(),
+                index,
+                raw_full.to_string(),
+                e.to_string(),
+            )),
+        }
+    } else if s.starts_with('^') && s.len() > 1 {
+        Ok(Pattern::StartsWith(s[1..].to_string()))
+    } else {
+        Ok(Pattern::Literal(s.to_string()))
+    }
 }

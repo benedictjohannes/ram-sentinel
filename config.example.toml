@@ -15,11 +15,16 @@ sigterm_wait_ms = 3000          # Wait 3s after SIGTERM before sending SIGKILL
 # 1. Regex: "/pattern/" matches Name or Command Line
 # 2. Prefix: "^string" matches START of Command Line
 # 3. Substring: "string" matches Name or Command Line
+# 4. Scoped (Dual-Layer): "@[CGROUP_PATTERN]@ CMDLINE_PATTERN"
+#    Matches cgroup v2 path FIRST, then cmdline.
+#    The CGROUP_PATTERN is the same with Matching Rule #1-3.
+#    Note that the space is mandatory and the match strips the "0::" prefix.
 
 kill_targets = [
   # TIER 1: The Expendables (Kill these first)
-  "type=renderer",              # Chrome/Electron tabs
-  "-contentproc",               # Firefox tabs
+  # Target by cgroup + cmdline (Efficient!)
+  "@[/Chromium|chrome|edge/]@ type=renderer",  # Chromium renderers
+  "-contentproc",                             # Firefox tabs (legacy style)
   
   # TIER 2: Development tools that often leak
   "/npm start/",                # NPM scripts
@@ -28,11 +33,13 @@ kill_targets = [
   "^/usr/bin/python",          # Python scripts
   
   # TIER 3: General heavy hitters
-  "intellij",                   # Java-based IDEs
+  "@[/app.slice/]@ intellij",     # Target IntelliJ only if it's in app.slice
+  "intellij",                   # Catch-all for other slices
 ]
 
 # Processes to NEVER kill (Prefix or Substring match)
 ignore_names = [
+  "@[session.slice]@ /./",      # Protect core desktop services
   "kwin",                       # KDE Window Manager
   "plasma",                     # KDE Desktop
   "gnome-shell",                # GNOME Shell
@@ -49,8 +56,10 @@ kill_strategy = "highest_oom_score"
 # Triggers if Available RAM falls below these values.
 # NOTE: If 'bytes' is set, it OVERRIDES 'percent' for that metric.
 [ram]
-warn_min_free_bytes = "500MB"      # Warn when memory starts getting tight
-kill_min_free_percent = 5.0      # Safety net: Kill if RAM drops below 5%
+warn_min_free_bytes   = "1GB"    # Warn when memory starts getting tight
+kill_min_free_bytes   = "500MB"  # Warn when memory starts getting tight
+warn_min_free_percent = 5.0      # Safety net: Kill if RAM drops below 5%
+kill_min_free_percent = 2.0      # Safety net: Kill if RAM drops below 5%
 
 # --- SWAP LIMITS ---
 # Same logic as RAM.
