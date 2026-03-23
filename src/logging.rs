@@ -99,6 +99,9 @@ fn emit_notification(event: &SentinelEvent<'_>) {
                 "process-stop",
             );
         }
+        SentinelEvent::KillSequenceAborted { .. } => {
+            send_notification("Kill Sequence Aborted", &event.to_string(), "dialog-error");
+        }
         SentinelEvent::Message { level, text, .. } => match level {
             LogLevel::Warn => {
                 send_notification("Ram Sentinel Warning", *text, "dialog-warning");

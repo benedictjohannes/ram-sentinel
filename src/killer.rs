@@ -75,7 +75,7 @@ impl Killer {
             let champion_opt = self.find_champion(ctx);
 
             let Some(champion) = champion_opt else {
-                self.log_sequence_finished(format_args!("No eligible kill candidates found!"));
+                self.log_sequence_aborted(format_args!("No eligible kill candidates found!"));
                 break;
             };
 
@@ -137,7 +137,7 @@ impl Killer {
                         });
                         continue;
                     } else {
-                        self.log_sequence_finished(format_args!(
+                        self.log_sequence_aborted(format_args!(
                             "Failed to kill victim PID {} ({}). Max failures (64) reached. Aborting.",
                             champion.pid, name_owned
                         ));
@@ -595,6 +595,16 @@ impl Killer {
             let _ = self.reason_buffer.write_fmt(args);
         }
         logging::emit(&SentinelEvent::KillSequenceFinished {
+            reason: &self.reason_buffer,
+        });
+    }
+
+    /// Internal helper to format a reason into `reason_buffer` and emit a `KillSequenceAborted` event.
+    fn log_sequence_aborted(&mut self, args: std::fmt::Arguments) {
+        if self.reason_buffer.is_empty() {
+            let _ = self.reason_buffer.write_fmt(args);
+        }
+        logging::emit(&SentinelEvent::KillSequenceAborted {
             reason: &self.reason_buffer,
         });
     }
