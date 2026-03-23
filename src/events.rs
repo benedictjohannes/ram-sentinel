@@ -109,7 +109,7 @@ pub enum SentinelEvent<'a> {
         strategy: &'a str,
         rss_freed: u64,
     },
-    KillSequenceAborted {
+    KillSequenceFinished {
         reason: &'a str,
     },
     KillCandidateIgnored {
@@ -279,8 +279,8 @@ impl fmt::Display for SentinelEvent<'_> {
                     strategy, process_name, pid, rss_str
                 )
             }
-            SentinelEvent::KillSequenceAborted { reason } => {
-                write!(f, "Kill Sequence Aborted: {}", reason)
+            SentinelEvent::KillSequenceFinished { reason } => {
+                write!(f, "Kill Sequence Finished: {}", reason)
             }
             SentinelEvent::KillCandidateIgnored { pid, reason } => {
                 write!(f, "Ignored Candidate PID {}: {}", pid, reason)
@@ -300,7 +300,7 @@ impl SentinelEvent<'_> {
             SentinelEvent::Startup { .. }
             | SentinelEvent::KillCandidateSelected { .. }
             | SentinelEvent::KillExecuted { .. }
-            | SentinelEvent::KillSequenceAborted { .. }
+            | SentinelEvent::KillSequenceFinished { .. }
             | SentinelEvent::KillCandidateIgnored { .. } => LogLevel::Info,
 
             SentinelEvent::LowMemoryWarn { .. }

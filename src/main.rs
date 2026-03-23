@@ -191,7 +191,7 @@ fn run_loop(ctx: RuntimeContext, no_kill: bool) {
                         if let Some(needed) = *amount_needed {
                             killer.kill_sequence(&ctx, Some(needed));
                         } else {
-                            logging::emit(&SentinelEvent::KillSequenceAborted {
+                            logging::emit(&SentinelEvent::KillSequenceFinished {
                                 reason: "Kill triggered but amount_needed is None/Zero",
                             });
                         }
