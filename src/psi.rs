@@ -64,7 +64,6 @@ pub fn read_psi_total() -> Result<u64, PsiError> {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct PsiConfig {
     pub warn_max_percent: Option<f32>,
     pub kill_max_percent: Option<f32>,

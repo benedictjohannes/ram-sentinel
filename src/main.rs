@@ -118,9 +118,9 @@ fn main() {
     }
     if args.print_config.is_some() {
         let defaults = Config::sane_defaults();
-        let yaml_content = serde_yaml::to_string(&defaults)
+        let toml_content = toml::to_string(&defaults)
             .expect("FATAL: Failed to serialize default configuration");
-        handle_output(args.print_config, &yaml_content);
+        handle_output(args.print_config, &toml_content);
         return;
     }
 

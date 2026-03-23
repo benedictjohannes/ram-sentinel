@@ -75,108 +75,118 @@ systemctl --user enable --now ram-sentinel
 
 ## ⚙️ Configuration
 
-`ram-sentinel` looks for a config file in `$XDG_CONFIG_HOME/ram-sentinel.yaml` (usually `~/.config/ram-sentinel.yaml`).
+`ram-sentinel` looks for a config file in `$XDG_CONFIG_HOME/ram-sentinel.toml` (usually `~/.config/ram-sentinel.toml`).
 
 ### 🌟 Recommended Configuration
 
 *Use this if you want the "Anti-Freeze" experience.* This enables the PSI monitor to kill runaway processes when the system starts thrashing (lagging), even if you technically have free RAM.
 
-```yaml
-ram:
-  warnMinFreeBytes: 500M
-  # Safety net: Kill if RAM drops below 5%
-  killMinFreePercent: 5.0 
-psi:
-  # Warn when system feels "heavy" (stuttering)
-  warnMaxPercent: 40.0
-  # EMERGENCY: Kill when system freezes (mouse lag/thrashing)
-  killMaxPercent: 85.0
-  amountToFree: 400M
-checkIntervalMs: 1000
-warnResetMs: 30000
-sigtermWaitMs: 2500
-ignoreNames:
+```toml
+[ram]
+warn_min_free_bytes = "500M"
+# Safety net: Kill if RAM drops below 5%
+kill_min_free_percent = 5.0 
+
+[psi]
+# Warn when system feels "heavy" (stuttering)
+warn_max_percent = 40.0
+# EMERGENCY: Kill when system freezes (mouse lag/thrashing)
+kill_max_percent = 85.0
+amount_to_free = "400M"
+
+check_interval_ms = 1000
+warn_reset_ms = 30000
+sigterm_wait_ms = 2500
+ignore_names = [
   # Broad matches to protect your shell/environment
-  - kwin
-  - plasma
-  - gnome-shell
-  - sshd
-killTargets:
+  "kwin",
+  "plasma",
+  "gnome-shell",
+  "sshd"
+]
+kill_targets = [
   # TIER 1 PRIORITY: The Expendables
   # These are killed FIRST.
-  - type=renderer       # Chrome/Electron tabs
-  - -contentproc        # Firefox tabs
-  - ^/usr/bin/node      # Strict prefix match for processes you want to target first, e.g. for local node scripts
-killStrategy: highestOomScore
+  "type=renderer",       # Chrome/Electron tabs
+  "-contentproc",        # Firefox tabs
+  "^/usr/bin/node"      # Strict prefix match for processes you want to target first, e.g. for local node scripts
+]
+kill_strategy = "highest_oom_score"
 ```
 
 ### Sane Defaults 🛡️
 
 If no config file is found, `ram-sentinel` loads this configuration automatically. It is conservative and focuses on preventing hard lockups.
 
-```yaml
-ram:
-  warnMinFreePercent: 10.0
-  killMinFreePercent: 5.0
-psi: {} # PSI disabled by default to be safe
-checkIntervalMs: 1000
-warnResetMs: 30000
-sigtermWaitMs: 5000
-killTargets:
-  - type=renderer
-  - -contentproc
-ignoreNames: []
-killStrategy: highestOomScore
+```toml
+[ram]
+warn_min_free_percent = 10.0
+kill_min_free_percent = 5.0
+
+[psi]
+# PSI disabled by default to be safe
+
+check_interval_ms = 1000
+warn_reset_ms = 30000
+sigterm_wait_ms = 5000
+kill_targets = [
+  "type=renderer",
+  "-contentproc"
+]
+ignore_names = []
+kill_strategy = "highest_oom_score"
 ```
 
 ### 📖 Full Configuration Reference
 
 Detailed explanation of every available option.
 
-```yaml
+```toml
 # --- RAM LIMITS ---
 # Triggers if Available RAM falls below these values.
-# NOTE: If 'Bytes' is set, it OVERRIDES 'Percent'.
-ram:
-  warnMinFreeBytes: 1G      # Warn if < 1GB free
-  warnMinFreePercent: 10.0  # (Ignored if Bytes is set)
-  killMinFreeBytes: 250M    # Kill if < 250MB free
-  killMinFreePercent: 5.0   # (Ignored if Bytes is set)
+# NOTE: If 'bytes' is set, it OVERRIDES 'percent'.
+[ram]
+warn_min_free_bytes = "1G"      # Warn if < 1GB free
+warn_min_free_percent = 10.0  # (Ignored if bytes is set)
+kill_min_free_bytes = "250M"    # Kill if < 250MB free
+kill_min_free_percent = 5.0   # (Ignored if bytes is set)
 
 # --- SWAP LIMITS ---
 # Same logic as RAM.
-swap:
-  warnMinFreePercent: 20.0
-  killMinFreePercent: 5.0
+[swap]
+warn_min_free_percent = 20.0
+kill_min_free_percent = 5.0
 
 # --- PSI (PRESSURE STALL INFORMATION) ---
 # Requires Linux Kernel 4.20+ with CONFIG_PSI=y
 # "Pressure" = % of time tasks are stalled waiting for memory.
-psi:
-  warnMaxPercent: 40.0      # Warn if system is stuttering (40% pressure)
-  killMaxPercent: 90.0      # Kill if system is frozen (90% pressure)
-  amountToFree: 500M        # If triggered, kill processes until 500MB is freed
+[psi]
+warn_max_percent = 40.0      # Warn if system is stuttering (40% pressure)
+kill_max_percent = 90.0      # Kill if system is frozen (90% pressure)
+amount_to_free = "500M"        # If triggered, kill processes until 500MB is freed
 
 # --- TIMING ---
-checkIntervalMs: 1000       # How often to poll system stats
-warnResetMs: 30000          # Don't spam notifications more than every 30s
-sigtermWaitMs: 3000         # Wait 3s after SIGTERM before sending SIGKILL
+check_interval_ms = 1000       # How often to poll system stats
+warn_reset_ms = 30000          # Don't spam notifications more than every 30s
+sigterm_wait_ms = 3000         # Wait 3s after SIGTERM before sending SIGKILL
 
 # --- TARGETING STRATEGY ---
 # 1. Regex: "/pattern/" matches Name or Command Line
 # 2. Prefix: "^string" matches START of Command Line
 # 3. Literal: "string" matches substring of Name
-killTargets:
-  - type=renderer           # Priority 1: Browser tabs
-  - /npm start/             # Priority 2: NPM scripts
-  - ^/usr/bin/python        # Priority 3: Python scripts
+kill_targets = [
+  "type=renderer",           # Priority 1: Browser tabs
+  "/npm start/",             # Priority 2: NPM scripts
+  "^/usr/bin/python"        # Priority 3: Python scripts
+]
 
-ignoreNames:
-  - ^Xorg                   # Never kill Xorg
-  - /wayland/               # Never kill Wayland compositors
+ignore_names = [
+  "^Xorg",                   # Never kill Xorg
+  "/wayland/"                # Never kill Wayland compositors
+]
 
-# Strategies: 'highestOomScore' (recommended) or 'largestRss'
-killStrategy: highestOomScore
+# Strategies: 'highest_oom_score' (recommended) or 'largest_rss'
+kill_strategy = "highest_oom_score"
 ```
 
 -----
@@ -185,7 +195,7 @@ killStrategy: highestOomScore
 
 `ram-sentinel` is built on the **Safety First** doctrine.
 
-1.  **Priority Queues:** We define a priority system for processes. `killTargets` are "Second Class Citizens"—they are always sacrificed first. Your main apps are only touched if shedding the expendables didn't solve the memory crisis.
+1.  **Priority Queues:** We define a priority system for processes. `kill_targets` are "Second Class Citizens"—they are always sacrificed first. Your main apps are only touched if shedding the expendables didn't solve the memory crisis.
 2.  **Identity Verification:** Before sending the final `SIGKILL`, the sentinel verifies that the PID's `create_time` matches the victim it selected 3 seconds ago. This prevents the "PID Reuse" race condition where a guardian accidentally kills a brand new process that grabbed the dead victim's PID.
 3.  **Strict Override:** Configuration follows a "Manual Override" logic. If you set a specific Byte limit (`500MB`), the vague Percentage limit (`5%`) is ignored. You get exactly what you ask for.
 

@@ -9,7 +9,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct Config {
     // Metric Triggers
     pub psi: Option<psi::PsiConfig>,
@@ -36,7 +35,6 @@ pub struct Config {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct MemoryConfig {
     pub warn_min_free_bytes: Option<String>,
     pub warn_min_free_percent: Option<f32>,
@@ -55,7 +53,7 @@ impl MemoryConfigParsed {
     pub fn try_from_config(config: MemoryConfig) -> Result<Self, ConfigError> {
         let warn_min_free_bytes = if let Some(s) = config.warn_min_free_bytes.as_ref() {
             Some(parse_size(s).ok_or_else(|| {
-                ConfigError::InvalidSize("warnMinFreeBytes".to_string(), s.clone())
+                ConfigError::InvalidSize("warn_min_free_bytes".to_string(), s.clone())
             })?)
         } else {
             None
@@ -63,7 +61,7 @@ impl MemoryConfigParsed {
 
         let kill_min_free_bytes = if let Some(s) = config.kill_min_free_bytes.as_ref() {
             Some(parse_size(s).ok_or_else(|| {
-                ConfigError::InvalidSize("killMinFreeBytes".to_string(), s.clone())
+                ConfigError::InvalidSize("kill_min_free_bytes".to_string(), s.clone())
             })?)
         } else {
             None
@@ -72,7 +70,7 @@ impl MemoryConfigParsed {
         if let Some(p) = config.warn_min_free_percent {
             if !(0.0..=100.0).contains(&p) {
                 return Err(ConfigError::InvalidPercent(
-                    "warnMinFreePercent".to_string(),
+                    "warn_min_free_percent".to_string(),
                     p,
                 ));
             }
@@ -81,7 +79,7 @@ impl MemoryConfigParsed {
         if let Some(p) = config.kill_min_free_percent {
             if !(0.0..=100.0).contains(&p) {
                 return Err(ConfigError::InvalidPercent(
-                    "killMinFreePercent".to_string(),
+                    "kill_min_free_percent".to_string(),
                     p,
                 ));
             }
@@ -97,7 +95,7 @@ impl MemoryConfigParsed {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub enum KillStrategy {
     LargestRss,
     HighestOomScore,
@@ -222,12 +220,9 @@ impl Config {
         if let Some(config_home) =
             directories::BaseDirs::new().map(|b| b.config_dir().to_path_buf())
         {
-            let extensions = ["yaml", "yml", "json", "toml"];
-            for ext in &extensions {
-                let path = config_home.join(format!("ram-sentinel.{}", ext));
-                if path.exists() {
-                    return Self::parse_file(&path);
-                }
+            let path = config_home.join("ram-sentinel.toml");
+            if path.exists() {
+                return Self::parse_file(&path);
             }
         }
 
@@ -242,21 +237,8 @@ impl Config {
         let content =
             fs::read_to_string(path).map_err(|e| ConfigError::FileRead(path.to_path_buf(), e))?;
 
-        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("yaml");
-
-        macro_rules! parse {
-            ($func:expr) => {
-                $func(&content)
-                    .map_err(|e| ConfigError::FileParse(path.to_path_buf(), e.to_string()))
-            };
-        }
-
-        match ext {
-            "yaml" | "yml" => parse!(serde_yaml::from_str),
-            "json" => parse!(serde_json::from_str),
-            "toml" => parse!(toml::from_str),
-            _ => parse!(serde_yaml::from_str),
-        }
+        toml::from_str(&content)
+            .map_err(|e| ConfigError::FileParse(path.to_path_buf(), e.to_string()))
     }
 
     pub fn sane_defaults() -> Config {
