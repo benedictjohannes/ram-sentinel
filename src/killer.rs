@@ -246,11 +246,10 @@ impl Killer {
                 // Calculate Match Index
                 let mut match_index = usize::MAX;
                 for (idx, pat) in ctx.kill_targets_regex.iter().enumerate() {
-                    // Optimized Skip: If we already have a champion that is better (lower match index)
-                    // than the current pattern index, we can stop checking patterns for this candidate.
-                    // Even if it matches this or later patterns, it will not be able to beat the current champion.
                     if let Some(champ) = &current_champion {
-                        if idx >= champ.match_index {
+                        // Current process has lower kill_target priority than current champion
+                        if idx > champ.match_index {
+                            // skip this process
                             break;
                         }
                     }
@@ -261,22 +260,23 @@ impl Killer {
                     }
                 }
 
-                // Targeting Strategy:
-                // 1. If the process didn't match any explicit targets (match_index == usize::MAX),
-                //    but the user has defined explicit targets, we skip this process.
-                //    This ensures general offending processes are only targeted if NO targets are defined.
+                // Targeting Strategy 1:
+                // If the process didn't match any explicit targets (match_index == usize::MAX),
+                // but the user has defined explicit targets, we skip this process.
+                // This ensures non kill_targets are only targeted if NO targets are defined.
                 if match_index == usize::MAX && !ctx.kill_targets_regex.is_empty() {
                     continue;
                 }
 
-                // 2. If we already have a champion with a better (lower) match index, skip this candidate.
+                // Targeting Strategy 2:
+                // If we already have a champion with a lower kill_targets match index, skip.
                 if let Some(champ) = &current_champion {
                     if match_index > champ.match_index {
                         continue;
                     }
                 }
 
-                // B. Resource Check: Always read RSS to ensure it's captured while the process is live.
+                // B. Resource Check: Read RSS when the process is still alive.
                 let mut rss = 0;
                 if self.read_file_into_scratch(pid, "statm").is_ok() {
                     if let Ok(s) = std::str::from_utf8(&self.scratch_buffer) {
@@ -442,7 +442,7 @@ impl Killer {
         self.scratch_buffer.clear();
         let capacity = self.scratch_buffer.capacity();
 
-        // Safety: Replaced unsafe set_len with safe resize which writes zeroes.
+        // We zero the buffer to prevent stale data. Tradeoff to avoid unsafe set_len.
         self.scratch_buffer.resize(capacity, 0);
 
         let bytes_read = match f.read(&mut self.scratch_buffer) {
