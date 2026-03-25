@@ -14,6 +14,7 @@ pub struct Config {
     pub psi: Option<psi::PsiConfig>,
     pub ram: Option<MemoryConfig>,
     pub swap: Option<MemoryConfig>,
+    pub zram: Option<MemoryConfig>,
 
     // Operational Settings
     #[serde(default = "default_interval")]
@@ -141,6 +142,7 @@ pub struct RuntimeContext {
     pub psi: Option<psi::PsiConfigParsed>,
     pub ram: Option<MemoryConfigParsed>,
     pub swap: Option<MemoryConfigParsed>,
+    pub zram: Option<MemoryConfigParsed>,
 
     pub check_interval_ms: u64,
     pub warn_reset_ms: u64,
@@ -208,10 +210,17 @@ impl Config {
             None
         };
 
+        let zram_parsed = if let Some(z) = config.zram {
+            Some(MemoryConfigParsed::try_from_config(z)?)
+        } else {
+            None
+        };
+
         Ok(RuntimeContext {
             psi: psi_parsed,
             ram: ram_parsed,
             swap: swap_parsed,
+            zram: zram_parsed,
             check_interval_ms: config.check_interval_ms,
             warn_reset_ms: config.warn_reset_ms,
             sigterm_wait_ms: config.sigterm_wait_ms,
@@ -282,6 +291,12 @@ impl Config {
                 kill_min_free_bytes: None,
                 kill_min_free_percent: None,
             }),
+            zram: Some(MemoryConfig {
+                warn_min_free_bytes: None,
+                warn_min_free_percent: None,
+                kill_min_free_bytes: None,
+                kill_min_free_percent: None,
+            }),
             check_interval_ms: default_interval(),
             warn_reset_ms: warn_interval(),
             sigterm_wait_ms: sigterm_wait_ms(),
@@ -299,8 +314,12 @@ impl Config {
             .swap
             .as_ref()
             .map_or(true, |s| s.is_effectively_empty());
+        let zram_empty = self
+            .zram
+            .as_ref()
+            .map_or(true, |z| z.is_effectively_empty());
 
-        if psi_empty && ram_empty && swap_empty {
+        if psi_empty && ram_empty && swap_empty && zram_empty {
             return Err(ConfigError::EffectiveEmpty);
         }
 
@@ -311,6 +330,10 @@ impl Config {
 
         if let Some(s) = self.swap.as_ref() {
             MemoryConfigParsed::try_from_config(s.clone())?;
+        }
+
+        if let Some(z) = self.zram.as_ref() {
+            MemoryConfigParsed::try_from_config(z.clone())?;
         }
 
         if let Some(p) = self.psi.as_ref() {
@@ -330,6 +353,9 @@ impl Config {
         }
         if swap_empty {
             self.swap = None;
+        }
+        if zram_empty {
+            self.zram = None;
         }
 
         if self.check_interval_ms > 300000 {

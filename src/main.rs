@@ -5,6 +5,7 @@ mod killer;
 mod logging; // Added
 mod monitor;
 mod psi;
+mod swap;
 mod system;
 mod utils;
 

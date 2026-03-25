@@ -1,5 +1,5 @@
 # RAM Sentinel Configuration Example 🛡️
-# This file showcases the recommended settings desktop users.
+# This file showcases the recommended settings for desktop users.
 # Save this to ~/.config/ram-sentinel.toml
 
 # --- OPERATIONAL SETTINGS ---
@@ -19,7 +19,7 @@ sigterm_wait_ms = 5000          # Give apps 5s to save/close before "The Hammer"
 #    If specified, matches cgroup v2 path FIRST, then cmdline.
 
 kill_targets = [
-  # Browser tabs
+  # Browser tabs (Surgical strikes)
   "@[/Chromium|chrome|edge/]@ type=renderer",  # Chromium renderers: kill some tabs, not whole browser
   "-contentproc",                              # Firefox tabs
   
@@ -34,6 +34,8 @@ kill_targets = [
 
 # If true, allow killing processes that don't match 'kill_targets' when it's populated.
 # Set to false to ensure only kill_targets are ever touched.
+# When false, and all kill_targets are gone but memory is still low, ram-sentinel 
+# will stop killing (safety first).
 allow_kill_outside_targets = false
 
 # --- GUARDIAN PROTECTION ---
@@ -48,29 +50,42 @@ ignore_names = [
 # 'highest_oom_score' uses the kernel's own "low-value" ranking.
 kill_strategy = "highest_oom_score"
 
-# --- RAM & SWAP TRIGGER SYSTEM ---
+# --- RAM, ZRAM & SWAP TRIGGER SYSTEM ---
 # Triggers if Available RAM/Swap falls below these values.
-# LOGIC: Explicit 'bytes' (e.g. "1GB") always OVERRIDDES 'percent' (e.g. 5.0).
+# LOGIC: Explicit 'bytes' (e.g. "1GB") always OVERRIDES 'percent' (e.g. 5.0).
 # Leave one as None/commented to use the other.
+# Monitoring is only enabled when the any metric is enabled/uncommented
 
 [ram]
-warn_min_free_bytes   = "1500MB" # Signal to start saving your work
-kill_min_free_bytes   = "800MB"  # Surgical strike to prevent freezing
-# warn_min_free_percent = 10.0
-# kill_min_free_percent = 5.0
+warn_min_free_percent = 10.0          # Warn = Signal to start saving your work (desktop notification)
+kill_min_free_percent = 5.0           # Kill = Start killing until this is met
+# warn_min_free_bytes   = "1500MB"    # Bytes override percent
+# kill_min_free_bytes   = "800MB"     # Bytes override percent
+
+[zram]
+# ZRAM is compressed RAM used as swap. 
+# This monitor tracks the logical (virtual) capacity of the ZRAM device.
+# Due to zram's nature, it is monitored separately from  
+# regular disk backed swap.
+# Enable if you use zram-generator, zram-tools, or similar.
+warn_min_free_percent = 5.0     # Warn when zram is filling up
+# kill_min_free_percent = 10.0  # We do not recommend enabling killing with zram. RAM monitoring is more reliable due to non-deterministic compression ratio of zram.
+# warn_min_free_bytes   = ""
+# kill_min_free_bytes   = ""
 
 [swap]
-# ZRAM USERS: Since zram IS RAM, keep these tightly tuned to the capacity 
-# of your zram device. If zram is full (even if RAM is free), your 
-# system will "file thrash" and lag heavily.
-warn_min_free_percent = 25.0     # Warn when the "compression safety net" is filling
-kill_min_free_percent = 10.0     # Strike before the cache is evicted
+# Disk-backed swap. Enable if you have a swapfile.
+# warn_min_free_percent = 15.0
+# kill_min_free_percent = 5.0
+# warn_min_free_bytes   = ""
+# kill_min_free_bytes   = ""
 
 # --- ANTI-FREEZE (PSI - PRESSURE STALL INFORMATION) ---
 # Pressure = % of time CPU/Tasks are stalled waiting for memory.
 # This prevents "The Deadlock" where the system is too busy for the CPU 
 # to even trigger the RAM/Swap limits. HIGHLY RECOMMENDED.
 [psi]
-warn_max_percent = 40.0         # "Stuttering" detected (Yellow alert)
-kill_max_percent = 85.0         # "Lockup Imminent" (Red alert)
-amount_to_free = "1GB"          # If psi triggers, kill until this amount is freed
+warn_max_percent = 40.0     # "Stuttering" detected (Yellow alert)
+kill_max_percent = 85.0     # "Lockup Imminent" (Red alert)
+amount_to_free = "1GB"      # If psi triggers, kill until this amount is freed
+# check_interval_ms = 5000  # PSI has its own polling interval (defaults to 10x global)

@@ -3,6 +3,7 @@ use crate::{
     events::{LogLevel, SentinelEvent},
     logging::{self, get_log_level},
     psi::read_psi_total,
+    swap,
 };
 use std::time::Instant;
 use sysinfo::{MemoryRefreshKind, RefreshKind, System};
@@ -16,6 +17,8 @@ pub struct Monitor {
     pub ram_percent: Option<f64>,
     pub swap_bytes: Option<u64>,
     pub swap_percent: Option<f64>,
+    pub zram_bytes: Option<u64>,
+    pub zram_percent: Option<f64>,
     pub psi_pressure: Option<f64>,
 }
 
@@ -43,6 +46,8 @@ impl Monitor {
             ram_percent: None,
             swap_bytes: None,
             swap_percent: None,
+            zram_bytes: None,
+            zram_percent: None,
             psi_pressure: None,
         }
     }
@@ -97,10 +102,18 @@ impl Monitor {
             }
         }
 
-        // Priority 2: Swap (Hard Limit)
+        // Priority 2: Swap (Traditional Disk)
+        let has_swap = ctx.swap.is_some();
+        let has_zram = ctx.zram.is_some();
+        let swap_stats = if has_swap || has_zram {
+            swap::get_aggregated_swap_stats(has_swap, has_zram)
+        } else {
+            swap::AggregatedSwapStats::default()
+        };
+
         if let Some(swap_config) = &ctx.swap {
-            let free = self.system.free_swap();
-            let total = self.system.total_swap();
+            let free = swap_stats.disk_free;
+            let total = swap_stats.disk_total;
 
             if total > 0 {
                 let percent_free = (free as f64 / total as f64) * 100.0;
@@ -139,7 +152,49 @@ impl Monitor {
             }
         }
 
-        // Priority 3: PSI
+        // Priority 3: ZRAM
+        if let Some(zram_config) = &ctx.zram {
+            let free = swap_stats.zram_free;
+            let total = swap_stats.zram_total;
+
+            if total > 0 {
+                let percent_free = (free as f64 / total as f64) * 100.0;
+                self.zram_bytes = Some(free);
+                self.zram_percent = Some(percent_free);
+
+                if let Some((threshold, type_str)) =
+                    check_kill(zram_config, free, percent_free as f32)
+                {
+                    let amount_needed = calc_needed(zram_config, free, total);
+                    return MonitorStatus::Kill(SentinelEvent::KillTriggered {
+                        trigger: "LowZram",
+                        observed_value: if type_str == "bytes" {
+                            free as f64
+                        } else {
+                            percent_free
+                        },
+                        threshold_value: threshold,
+                        threshold_type: type_str,
+                        amount_needed,
+                    });
+                }
+
+                if let Some((threshold, type_str)) =
+                    check_warn(zram_config, free, percent_free as f32)
+                {
+                    if pending_warn.is_none() {
+                        pending_warn = Some(SentinelEvent::LowZramWarn {
+                            free_bytes: free,
+                            free_percent: percent_free,
+                            threshold_type: type_str,
+                            threshold_value: threshold,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Priority 4: PSI
         if let Some(psi_config) = &ctx.psi {
             if now.duration_since(self.last_psi_time).as_millis() as u64
                 >= psi_config.check_interval_ms
@@ -202,6 +257,8 @@ impl Monitor {
                 memory_available_percent: self.ram_percent,
                 swap_free_bytes: self.swap_bytes,
                 swap_free_percent: self.swap_percent,
+                zram_free_bytes: self.zram_bytes,
+                zram_free_percent: self.zram_percent,
                 psi_pressure: self.psi_pressure,
             });
         }

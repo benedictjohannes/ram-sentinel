@@ -80,6 +80,8 @@ pub enum SentinelEvent<'a> {
         memory_available_percent: Option<f64>,
         swap_free_bytes: Option<u64>,
         swap_free_percent: Option<f64>,
+        zram_free_bytes: Option<u64>,
+        zram_free_percent: Option<f64>,
         psi_pressure: Option<f64>,
     },
     LowMemoryWarn {
@@ -89,6 +91,12 @@ pub enum SentinelEvent<'a> {
         threshold_value: f64,
     },
     LowSwapWarn {
+        free_bytes: u64,
+        free_percent: f64,
+        threshold_type: &'a str,
+        threshold_value: f64,
+    },
+    LowZramWarn {
         free_bytes: u64,
         free_percent: f64,
         threshold_type: &'a str,
@@ -144,6 +152,8 @@ impl fmt::Display for SentinelEvent<'_> {
                 memory_available_percent: _,
                 swap_free_bytes,
                 swap_free_percent: _,
+                zram_free_bytes,
+                zram_free_percent: _,
                 psi_pressure,
             } => {
                 let avail_str = match memory_available_bytes {
@@ -156,6 +166,11 @@ impl fmt::Display for SentinelEvent<'_> {
                     None => "N/A".to_string(),
                 };
 
+                let zram_str = match zram_free_bytes {
+                    Some(b) => format_bytes(*b),
+                    None => "N/A".to_string(),
+                };
+
                 let psi_str = match psi_pressure {
                     Some(p) => format!("{:.2}", p),
                     None => "N/A".to_string(),
@@ -163,8 +178,8 @@ impl fmt::Display for SentinelEvent<'_> {
 
                 write!(
                     f,
-                    "Memory: {} available, Swap: {} available, PSI: {}",
-                    avail_str, swap_str, psi_str
+                    "Memory: {} available, Swap: {} available, ZRAM: {} available, PSI: {}",
+                    avail_str, swap_str, zram_str, psi_str
                 )
             }
             SentinelEvent::LowMemoryWarn {
@@ -207,6 +222,28 @@ impl fmt::Display for SentinelEvent<'_> {
                     write!(
                         f,
                         "Low Swap: {} ({:.2}%) available (Limit: {:.2}%)",
+                        free_str, free_percent, threshold_value
+                    )
+                }
+            }
+            SentinelEvent::LowZramWarn {
+                free_bytes,
+                free_percent,
+                threshold_type,
+                threshold_value,
+            } => {
+                let free_str = format_bytes(*free_bytes);
+                if *threshold_type == "bytes" {
+                    let thresh_str = format_bytes(*threshold_value as u64);
+                    write!(
+                        f,
+                        "Low ZRAM: {} available (Limit: {})",
+                        free_str, thresh_str
+                    )
+                } else {
+                    write!(
+                        f,
+                        "Low ZRAM: {} ({:.2}%) available (Limit: {:.2}%)",
                         free_str, free_percent, threshold_value
                     )
                 }
@@ -301,6 +338,7 @@ impl SentinelEvent<'_> {
 
             SentinelEvent::LowMemoryWarn { .. }
             | SentinelEvent::LowSwapWarn { .. }
+            | SentinelEvent::LowZramWarn { .. }
             | SentinelEvent::PsiPressureWarn { .. } => LogLevel::Warn,
 
             SentinelEvent::KillTriggered { .. } => LogLevel::Error,
