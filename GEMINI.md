@@ -18,7 +18,7 @@
 **Key Crates:**
 - `sysinfo`: Used only for global system metrics (RAM/Swap totals). Prohibited in the kill sequence to avoid heap allocations.
 - `nix`: Signal handling (`SIGTERM`, `SIGKILL`).
-- `serde`, `serde_yaml` `toml`: Strict configuration parsing.
+- `serde`, `toml`: Strict configuration parsing.
 - `serde_json`: Configuration parsing and logging.
 - `regex`: Pattern matching.
 - `byte-unit` (5.0+): Parsing "1GB", "500MB".
