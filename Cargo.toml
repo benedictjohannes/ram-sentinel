@@ -1,6 +1,6 @@
 [package]
 name = "ram-sentinel"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 description = "A surgical OOM prevention daemon for Linux desktops. Configurably monitors RAM, swap, and/or PSI (Pressure Stall Information) to selectively kill low-priority processes (e.g., browser tabs) before the system freezes."
 license = "MIT"
