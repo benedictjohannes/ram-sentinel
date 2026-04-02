@@ -25,8 +25,8 @@ pub struct Config {
     pub sigterm_wait_ms: u64,
 
     // Targeting Logic
-    #[serde(default = "default_ignore_names")]
-    pub ignore_names: Vec<String>,
+    #[serde(default = "default_ignore_targets")]
+    pub ignore_targets: Vec<String>,
 
     #[serde(default = "default_kill_targets")]
     pub kill_targets: Vec<String>,
@@ -133,7 +133,7 @@ fn default_kill_targets() -> Vec<String> {
 fn default_allow_kill_outside_targets() -> bool {
     false
 }
-fn default_ignore_names() -> Vec<String> {
+fn default_ignore_targets() -> Vec<String> {
     vec!["ram-sentinel".to_string()]
 }
 
@@ -150,7 +150,7 @@ pub struct RuntimeContext {
 
     pub kill_strategy: KillStrategy,
 
-    pub ignore_names_regex: Vec<TargetPattern>,
+    pub ignore_targets_regex: Vec<TargetPattern>,
     pub kill_targets_regex: Vec<TargetPattern>,
     pub allow_kill_outside_targets: bool,
 }
@@ -183,7 +183,7 @@ impl Config {
         let config = Self::load_raw_validated(cli_config_path)?;
 
         // Optimization: Compile Regex patterns
-        let ignore_names_regex = compile_patterns(&config.ignore_names, "ignore_names")?;
+        let ignore_targets_regex = compile_patterns(&config.ignore_targets, "ignore_targets")?;
         let kill_targets_regex = compile_patterns(&config.kill_targets, "kill_targets")?;
 
         let psi_parsed = if let Some(p) = config.psi {
@@ -225,7 +225,7 @@ impl Config {
             warn_reset_ms: config.warn_reset_ms,
             sigterm_wait_ms: config.sigterm_wait_ms,
             kill_strategy: config.kill_strategy,
-            ignore_names_regex,
+            ignore_targets_regex,
             kill_targets_regex,
             allow_kill_outside_targets: config.allow_kill_outside_targets,
         })
@@ -300,7 +300,7 @@ impl Config {
             check_interval_ms: default_interval(),
             warn_reset_ms: warn_interval(),
             sigterm_wait_ms: sigterm_wait_ms(),
-            ignore_names: default_ignore_names(),
+            ignore_targets: default_ignore_targets(),
             kill_targets: default_kill_targets(),
             kill_strategy: default_strategy(),
             allow_kill_outside_targets: default_allow_kill_outside_targets(),
@@ -342,7 +342,7 @@ impl Config {
         }
 
         // Validate Patterns
-        compile_patterns(&self.ignore_names, "ignore_names")?;
+        compile_patterns(&self.ignore_targets, "ignore_targets")?;
         compile_patterns(&self.kill_targets, "kill_targets")?;
 
         if psi_empty {

@@ -40,7 +40,7 @@ allow_kill_outside_targets = false
 
 # --- GUARDIAN PROTECTION ---
 # Processes to NEVER kill (Same matching rules as kill_targets)
-ignore_names = [
+ignore_targets = [
   "@[/session.slice/]@ /./",    # PROTECT: All core desktop and session services
   "sshd",                       # PROTECT: Don't lock yourself out of a server!
   "ram-sentinel"                # PROTECT: Don't kill self

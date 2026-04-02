@@ -163,7 +163,7 @@ kill_targets = [
   "-contentproc"
 ]
 allow_kill_outside_targets = false
-ignore_names = ["ram-sentinel"]
+ignore_targets = ["ram-sentinel"]
 kill_strategy = "highest_oom_score"
 ```
 </details>
@@ -184,7 +184,7 @@ ram-sentinel --config my-test-config.toml --check-config
 
 `ram-sentinel` is built on the **Safety First** doctrine.
 
-1.  **Priority Queues:** We define a priority system for processes. `kill_targets` are "Second Class Citizens" that gets sacrificed first. Processes in `ignore_names` would never be targetted. Other apps are only touched if shedding the expendables didn't solve the memory crisis.
+1.  **Priority Queues:** We define a priority system for processes. `kill_targets` are "Second Class Citizens" that gets sacrificed first. Processes in `ignore_targets` would never be targetted. Other apps are only touched if shedding the expendables didn't solve the memory crisis.
 2.  **Identity Verification:** Before sending the final `SIGKILL`, the sentinel verifies that the PID's `create_time` matches the victim it selected 3 seconds ago. This prevents the "PID Reuse" race condition where a guardian accidentally kills a brand new process that grabbed the dead victim's PID.
 3.  **Strict Override:** Configuration follows a "Manual Override" logic. If you set a specific Byte limit (`500MB`), the vague Percentage limit (`5%`) is ignored. You get exactly what you ask for.
 

@@ -233,7 +233,7 @@ impl Killer {
 
                 // Check Ignored
                 let mut ignored = false;
-                for pat in &ctx.ignore_names_regex {
+                for pat in &ctx.ignore_targets_regex {
                     if self.matches_target(pid, pat) {
                         ignored = true;
                         break;
