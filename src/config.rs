@@ -9,12 +9,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct Config {
     // Metric Triggers
     pub psi: Option<psi::PsiConfig>,
     pub ram: Option<MemoryConfig>,
     pub swap: Option<MemoryConfig>,
+    pub zram: Option<MemoryConfig>,
 
     // Operational Settings
     #[serde(default = "default_interval")]
@@ -25,7 +25,7 @@ pub struct Config {
     pub sigterm_wait_ms: u64,
 
     // Targeting Logic
-    #[serde(default)]
+    #[serde(default = "default_ignore_names")]
     pub ignore_names: Vec<String>,
 
     #[serde(default = "default_kill_targets")]
@@ -33,10 +33,12 @@ pub struct Config {
 
     #[serde(default = "default_strategy")]
     pub kill_strategy: KillStrategy,
+
+    #[serde(default = "default_allow_kill_outside_targets")]
+    pub allow_kill_outside_targets: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct MemoryConfig {
     pub warn_min_free_bytes: Option<String>,
     pub warn_min_free_percent: Option<f32>,
@@ -55,7 +57,7 @@ impl MemoryConfigParsed {
     pub fn try_from_config(config: MemoryConfig) -> Result<Self, ConfigError> {
         let warn_min_free_bytes = if let Some(s) = config.warn_min_free_bytes.as_ref() {
             Some(parse_size(s).ok_or_else(|| {
-                ConfigError::InvalidSize("warnMinFreeBytes".to_string(), s.clone())
+                ConfigError::InvalidSize("warn_min_free_bytes".to_string(), s.clone())
             })?)
         } else {
             None
@@ -63,7 +65,7 @@ impl MemoryConfigParsed {
 
         let kill_min_free_bytes = if let Some(s) = config.kill_min_free_bytes.as_ref() {
             Some(parse_size(s).ok_or_else(|| {
-                ConfigError::InvalidSize("killMinFreeBytes".to_string(), s.clone())
+                ConfigError::InvalidSize("kill_min_free_bytes".to_string(), s.clone())
             })?)
         } else {
             None
@@ -72,7 +74,7 @@ impl MemoryConfigParsed {
         if let Some(p) = config.warn_min_free_percent {
             if !(0.0..=100.0).contains(&p) {
                 return Err(ConfigError::InvalidPercent(
-                    "warnMinFreePercent".to_string(),
+                    "warn_min_free_percent".to_string(),
                     p,
                 ));
             }
@@ -81,7 +83,7 @@ impl MemoryConfigParsed {
         if let Some(p) = config.kill_min_free_percent {
             if !(0.0..=100.0).contains(&p) {
                 return Err(ConfigError::InvalidPercent(
-                    "killMinFreePercent".to_string(),
+                    "kill_min_free_percent".to_string(),
                     p,
                 ));
             }
@@ -97,7 +99,7 @@ impl MemoryConfigParsed {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "snake_case")]
 pub enum KillStrategy {
     LargestRss,
     HighestOomScore,
@@ -128,12 +130,19 @@ fn default_strategy() -> KillStrategy {
 fn default_kill_targets() -> Vec<String> {
     vec!["type=renderer".to_string(), "-contentproc".to_string()]
 }
+fn default_allow_kill_outside_targets() -> bool {
+    false
+}
+fn default_ignore_names() -> Vec<String> {
+    vec!["ram-sentinel".to_string()]
+}
 
 #[derive(Debug)]
 pub struct RuntimeContext {
     pub psi: Option<psi::PsiConfigParsed>,
     pub ram: Option<MemoryConfigParsed>,
     pub swap: Option<MemoryConfigParsed>,
+    pub zram: Option<MemoryConfigParsed>,
 
     pub check_interval_ms: u64,
     pub warn_reset_ms: u64,
@@ -141,8 +150,15 @@ pub struct RuntimeContext {
 
     pub kill_strategy: KillStrategy,
 
-    pub ignore_names_regex: Vec<Pattern>,
-    pub kill_targets_regex: Vec<Pattern>,
+    pub ignore_names_regex: Vec<TargetPattern>,
+    pub kill_targets_regex: Vec<TargetPattern>,
+    pub allow_kill_outside_targets: bool,
+}
+
+#[derive(Debug)]
+pub struct TargetPattern {
+    pub cgroup: Option<Pattern>,
+    pub cmdline: Pattern,
 }
 
 #[derive(Debug)]
@@ -164,18 +180,7 @@ impl Pattern {
 
 impl Config {
     pub fn load(cli_config_path: Option<PathBuf>) -> Result<RuntimeContext, ConfigError> {
-        let mut config = match cli_config_path {
-            Some(path) => {
-                if !path.exists() {
-                    // Was Exit code 2
-                    return Err(ConfigError::ConfigFileNotFound(path));
-                }
-                Self::parse_file(&path)?
-            }
-            None => Self::find_and_load_config()?,
-        };
-
-        config.validate()?;
+        let config = Self::load_raw_validated(cli_config_path)?;
 
         // Optimization: Compile Regex patterns
         let ignore_names_regex = compile_patterns(&config.ignore_names, "ignore_names")?;
@@ -205,35 +210,55 @@ impl Config {
             None
         };
 
+        let zram_parsed = if let Some(z) = config.zram {
+            Some(MemoryConfigParsed::try_from_config(z)?)
+        } else {
+            None
+        };
+
         Ok(RuntimeContext {
             psi: psi_parsed,
             ram: ram_parsed,
             swap: swap_parsed,
+            zram: zram_parsed,
             check_interval_ms: config.check_interval_ms,
             warn_reset_ms: config.warn_reset_ms,
             sigterm_wait_ms: config.sigterm_wait_ms,
             kill_strategy: config.kill_strategy,
             ignore_names_regex,
             kill_targets_regex,
+            allow_kill_outside_targets: config.allow_kill_outside_targets,
         })
+    }
+
+    pub fn load_raw_validated(cli_config_path: Option<PathBuf>) -> Result<Config, ConfigError> {
+        let mut config = match cli_config_path {
+            Some(path) => {
+                if !path.exists() {
+                    return Err(ConfigError::ConfigFileNotFound(path));
+                }
+                Self::parse_file(&path)?
+            }
+            None => Self::find_and_load_config()?,
+        };
+
+        config.validate()?;
+        Ok(config)
     }
 
     fn find_and_load_config() -> Result<Config, ConfigError> {
         if let Some(config_home) =
             directories::BaseDirs::new().map(|b| b.config_dir().to_path_buf())
         {
-            let extensions = ["yaml", "yml", "json", "toml"];
-            for ext in &extensions {
-                let path = config_home.join(format!("ram-sentinel.{}", ext));
-                if path.exists() {
-                    return Self::parse_file(&path);
-                }
+            let path = config_home.join("ram-sentinel.toml");
+            if path.exists() {
+                return Self::parse_file(&path);
             }
         }
 
         logging::emit(&SentinelEvent::Message {
             level: LogLevel::Info,
-            text: "No configuration file found. Loading sane defaults.".to_string(),
+            text: "No configuration file found. Loading sane defaults.",
         });
         Ok(Self::sane_defaults())
     }
@@ -242,21 +267,8 @@ impl Config {
         let content =
             fs::read_to_string(path).map_err(|e| ConfigError::FileRead(path.to_path_buf(), e))?;
 
-        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("yaml");
-
-        macro_rules! parse {
-            ($func:expr) => {
-                $func(&content)
-                    .map_err(|e| ConfigError::FileParse(path.to_path_buf(), e.to_string()))
-            };
-        }
-
-        match ext {
-            "yaml" | "yml" => parse!(serde_yaml::from_str),
-            "json" => parse!(serde_json::from_str),
-            "toml" => parse!(toml::from_str),
-            _ => parse!(serde_yaml::from_str),
-        }
+        toml::from_str(&content)
+            .map_err(|e| ConfigError::FileParse(path.to_path_buf(), e.to_string()))
     }
 
     pub fn sane_defaults() -> Config {
@@ -279,12 +291,19 @@ impl Config {
                 kill_min_free_bytes: None,
                 kill_min_free_percent: None,
             }),
+            zram: Some(MemoryConfig {
+                warn_min_free_bytes: None,
+                warn_min_free_percent: None,
+                kill_min_free_bytes: None,
+                kill_min_free_percent: None,
+            }),
             check_interval_ms: default_interval(),
             warn_reset_ms: warn_interval(),
             sigterm_wait_ms: sigterm_wait_ms(),
-            ignore_names: vec![],
+            ignore_names: default_ignore_names(),
             kill_targets: default_kill_targets(),
             kill_strategy: default_strategy(),
+            allow_kill_outside_targets: default_allow_kill_outside_targets(),
         }
     }
 
@@ -295,10 +314,37 @@ impl Config {
             .swap
             .as_ref()
             .map_or(true, |s| s.is_effectively_empty());
+        let zram_empty = self
+            .zram
+            .as_ref()
+            .map_or(true, |z| z.is_effectively_empty());
 
-        if psi_empty && ram_empty && swap_empty {
+        if psi_empty && ram_empty && swap_empty && zram_empty {
             return Err(ConfigError::EffectiveEmpty);
         }
+
+        // Detailed Validation
+        if let Some(r) = self.ram.as_ref() {
+            MemoryConfigParsed::try_from_config(r.clone())?;
+        }
+
+        if let Some(s) = self.swap.as_ref() {
+            MemoryConfigParsed::try_from_config(s.clone())?;
+        }
+
+        if let Some(z) = self.zram.as_ref() {
+            MemoryConfigParsed::try_from_config(z.clone())?;
+        }
+
+        if let Some(p) = self.psi.as_ref() {
+            psi::PsiConfigParsed::try_from_config(p.clone(), self.check_interval_ms)
+                .map_err(|e| ConfigError::PsiConfig(e.to_string()))?;
+        }
+
+        // Validate Patterns
+        compile_patterns(&self.ignore_names, "ignore_names")?;
+        compile_patterns(&self.kill_targets, "kill_targets")?;
+
         if psi_empty {
             self.psi = None;
         }
@@ -307,6 +353,9 @@ impl Config {
         }
         if swap_empty {
             self.swap = None;
+        }
+        if zram_empty {
+            self.zram = None;
         }
 
         if self.check_interval_ms > 300000 {
@@ -321,30 +370,63 @@ impl Config {
     }
 }
 
-fn compile_patterns(raw: &[String], field_name: &str) -> Result<Vec<Pattern>, ConfigError> {
+fn compile_patterns(raw: &[String], field_name: &str) -> Result<Vec<TargetPattern>, ConfigError> {
     let mut patterns = Vec::new();
-    for (i, s) in raw.iter().enumerate() {
-        if s.starts_with('/') && s.ends_with('/') && s.len() > 2 {
-            // Case 1: Regex
-            let regex_str = &s[1..s.len() - 1];
-            match Regex::new(regex_str) {
-                Ok(re) => patterns.push(Pattern::Regex(re)),
-                Err(e) => {
-                    return Err(ConfigError::RegexError(
-                        field_name.to_string(),
-                        i,
-                        s.clone(),
-                        e.to_string(),
-                    ));
-                }
+    for (i, raw_str) in raw.iter().enumerate() {
+        if raw_str.starts_with("@[") {
+            if let Some(end_bracket) = raw_str.find("]@ ") {
+                let cgroup_part = &raw_str[2..end_bracket];
+                let cmdline_part = &raw_str[end_bracket + 3..];
+
+                let cgroup_pat = parse_single_pattern(cgroup_part, field_name, i, raw_str)?;
+                let cmdline_pat = parse_single_pattern(cmdline_part, field_name, i, raw_str)?;
+
+                patterns.push(TargetPattern {
+                    cgroup: Some(cgroup_pat),
+                    cmdline: cmdline_pat,
+                });
+                continue;
+            } else {
+                return Err(ConfigError::FileParse(
+                    PathBuf::from("config"),
+                    format!(
+                        "Invalid pattern in {}: missing mandatory closing ']@ ' in '{}'",
+                        field_name, raw_str
+                    ),
+                ));
             }
-        } else if s.starts_with('^') && s.len() > 1 {
-            // Case 2: StartsWith
-            patterns.push(Pattern::StartsWith(s[1..].to_string()));
-        } else {
-            // Case 3: Literal
-            patterns.push(Pattern::Literal(s.clone()));
         }
+
+        // Fallback or explicit cmdline-only
+        let cmdline_pat = parse_single_pattern(raw_str, field_name, i, raw_str)?;
+        patterns.push(TargetPattern {
+            cgroup: None,
+            cmdline: cmdline_pat,
+        });
     }
     Ok(patterns)
+}
+
+fn parse_single_pattern(
+    s: &str,
+    field_name: &str,
+    index: usize,
+    raw_full: &str,
+) -> Result<Pattern, ConfigError> {
+    if s.starts_with('/') && s.ends_with('/') && s.len() > 2 {
+        let regex_str = &s[1..s.len() - 1];
+        match Regex::new(regex_str) {
+            Ok(re) => Ok(Pattern::Regex(re)),
+            Err(e) => Err(ConfigError::RegexError(
+                field_name.to_string(),
+                index,
+                raw_full.to_string(),
+                e.to_string(),
+            )),
+        }
+    } else if s.starts_with('^') && s.len() > 1 {
+        Ok(Pattern::StartsWith(s[1..].to_string()))
+    } else {
+        Ok(Pattern::Literal(s.to_string()))
+    }
 }

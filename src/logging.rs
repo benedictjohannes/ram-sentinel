@@ -31,7 +31,7 @@ fn get_log_mode() -> LogMode {
 }
 
 /// Primary entry point for logging/notifying.
-pub fn emit(event: &SentinelEvent) {
+pub fn emit(event: &SentinelEvent<'_>) {
     // 1. Check Global Log Level (Filtering)
     // If event severity (e.g., Info=3) is greater than Configured Level (e.g., Warn=2), skip.
     if event.severity() > get_log_level() {
@@ -48,7 +48,7 @@ pub fn emit(event: &SentinelEvent) {
     }
 }
 
-fn log_compact(event: &SentinelEvent) {
+fn log_compact(event: &SentinelEvent<'_>) {
     // Format: YYYY-MM-DDTHH:MM:SSZ [LEVEL] Message...
     println!(
         "{} [{}] {}",
@@ -58,7 +58,7 @@ fn log_compact(event: &SentinelEvent) {
     );
 }
 
-fn log_json(event: &SentinelEvent) {
+fn log_json(event: &SentinelEvent<'_>) {
     // We use serde_json::to_value to get the fields of the event
     let mut log_entry = serde_json::to_value(event).unwrap_or(json!({
         "event": "SerializationError"
@@ -70,7 +70,7 @@ fn log_json(event: &SentinelEvent) {
         map.insert("level".into(), event.severity().as_str().into());
         match event {
             SentinelEvent::Message { level: _, text } => {
-                map.insert("message".into(), text.as_str().into());
+                map.insert("message".into(), (*text).into());
                 map.remove("text");
             }
             _ => {}
@@ -81,7 +81,7 @@ fn log_json(event: &SentinelEvent) {
     println!("{}", serde_json::to_string(&log_entry).unwrap());
 }
 
-fn emit_notification(event: &SentinelEvent) {
+fn emit_notification(event: &SentinelEvent<'_>) {
     // Only notify on actual issues or actions, not just Info logs
     match event {
         SentinelEvent::LowMemoryWarn { .. }
@@ -99,12 +99,15 @@ fn emit_notification(event: &SentinelEvent) {
                 "process-stop",
             );
         }
+        SentinelEvent::KillSequenceAborted { .. } => {
+            send_notification("Kill Sequence Aborted", &event.to_string(), "dialog-error");
+        }
         SentinelEvent::Message { level, text, .. } => match level {
             LogLevel::Warn => {
-                send_notification("Ram Sentinel Warning", text, "dialog-warning");
+                send_notification("Ram Sentinel Warning", *text, "dialog-warning");
             }
             LogLevel::Error => {
-                send_notification("Ram Sentinel Error", text, "dialog-error");
+                send_notification("Ram Sentinel Error", *text, "dialog-error");
             }
             _ => {}
         },

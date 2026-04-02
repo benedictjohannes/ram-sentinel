@@ -51,16 +51,25 @@ impl LogMode {
     }
 }
 
+// --- Utility Functions ---
+
+fn format_bytes(bytes: u64) -> String {
+    format!(
+        "{:.2}",
+        Byte::from_u64(bytes).get_appropriate_unit(byte_unit::UnitType::Decimal)
+    )
+}
+
 // --- Event Definition ---
 
 #[derive(Serialize, Clone)]
 #[serde(tag = "message", rename_all = "snake_case")]
-pub enum SentinelEvent {
+pub enum SentinelEvent<'a> {
     // Generic Message Wrapper
     Message {
         #[serde(skip)] // We don't need "level" twice in JSON (it's in the root)
         level: LogLevel,
-        text: String,
+        text: &'a str,
     },
 
     Startup {
@@ -71,18 +80,26 @@ pub enum SentinelEvent {
         memory_available_percent: Option<f64>,
         swap_free_bytes: Option<u64>,
         swap_free_percent: Option<f64>,
+        zram_free_bytes: Option<u64>,
+        zram_free_percent: Option<f64>,
         psi_pressure: Option<f64>,
     },
     LowMemoryWarn {
         available_bytes: u64,
         available_percent: f64,
-        threshold_type: String,
+        threshold_type: &'a str,
         threshold_value: f64,
     },
     LowSwapWarn {
         free_bytes: u64,
         free_percent: f64,
-        threshold_type: String,
+        threshold_type: &'a str,
+        threshold_value: f64,
+    },
+    LowZramWarn {
+        free_bytes: u64,
+        free_percent: f64,
+        threshold_type: &'a str,
         threshold_value: f64,
     },
     PsiPressureWarn {
@@ -90,36 +107,39 @@ pub enum SentinelEvent {
         threshold: f64,
     },
     KillTriggered {
-        trigger: String,
+        trigger: &'a str,
         observed_value: f64,
         threshold_value: f64,
-        threshold_type: String,
+        threshold_type: &'a str,
         amount_needed: Option<u64>,
     },
     KillCandidateSelected {
         pid: u32,
-        process_name: String,
+        process_name: &'a str,
         score: u64,
         rss: u64,
         match_index: usize,
     },
     KillExecuted {
         pid: u32,
-        process_name: String,
-        strategy: String,
+        process_name: &'a str,
+        strategy: &'a str,
         rss_freed: u64,
     },
+    KillSequenceFinished {
+        reason: &'a str,
+    },
     KillSequenceAborted {
-        reason: String,
+        reason: &'a str,
     },
     KillCandidateIgnored {
         pid: u32,
-        reason: String,
+        reason: &'a str,
     },
 }
 
 // --- Display Implementation (for Compact Mode) ---
-impl fmt::Display for SentinelEvent {
+impl fmt::Display for SentinelEvent<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             SentinelEvent::Message { text, .. } => write!(f, "{}", text),
@@ -132,19 +152,22 @@ impl fmt::Display for SentinelEvent {
                 memory_available_percent: _,
                 swap_free_bytes,
                 swap_free_percent: _,
+                zram_free_bytes,
+                zram_free_percent: _,
                 psi_pressure,
             } => {
                 let avail_str = match memory_available_bytes {
-                    Some(b) => Byte::from_u64(*b)
-                        .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                        .to_string(),
+                    Some(b) => format_bytes(*b),
                     None => "N/A".to_string(),
                 };
 
                 let swap_str = match swap_free_bytes {
-                    Some(b) => Byte::from_u64(*b)
-                        .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                        .to_string(),
+                    Some(b) => format_bytes(*b),
+                    None => "N/A".to_string(),
+                };
+
+                let zram_str = match zram_free_bytes {
+                    Some(b) => format_bytes(*b),
                     None => "N/A".to_string(),
                 };
 
@@ -155,8 +178,8 @@ impl fmt::Display for SentinelEvent {
 
                 write!(
                     f,
-                    "Memory: {} available, Swap: {} available, PSI: {}",
-                    avail_str, swap_str, psi_str
+                    "Memory: {} available, Swap: {} available, ZRAM: {} available, PSI: {}",
+                    avail_str, swap_str, zram_str, psi_str
                 )
             }
             SentinelEvent::LowMemoryWarn {
@@ -165,13 +188,9 @@ impl fmt::Display for SentinelEvent {
                 threshold_type,
                 threshold_value,
             } => {
-                let avail_str = Byte::from_u64(*available_bytes)
-                    .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                    .to_string();
-                if threshold_type == "bytes" {
-                    let thresh_str = Byte::from_u64(*threshold_value as u64)
-                        .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                        .to_string();
+                let avail_str = format_bytes(*available_bytes);
+                if *threshold_type == "bytes" {
+                    let thresh_str = format_bytes(*threshold_value as u64);
                     write!(
                         f,
                         "Low RAM: {} available (Limit: {})",
@@ -191,13 +210,9 @@ impl fmt::Display for SentinelEvent {
                 threshold_type,
                 threshold_value,
             } => {
-                let free_str = Byte::from_u64(*free_bytes)
-                    .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                    .to_string();
-                if threshold_type == "bytes" {
-                    let thresh_str = Byte::from_u64(*threshold_value as u64)
-                        .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                        .to_string();
+                let free_str = format_bytes(*free_bytes);
+                if *threshold_type == "bytes" {
+                    let thresh_str = format_bytes(*threshold_value as u64);
                     write!(
                         f,
                         "Low Swap: {} available (Limit: {})",
@@ -207,6 +222,28 @@ impl fmt::Display for SentinelEvent {
                     write!(
                         f,
                         "Low Swap: {} ({:.2}%) available (Limit: {:.2}%)",
+                        free_str, free_percent, threshold_value
+                    )
+                }
+            }
+            SentinelEvent::LowZramWarn {
+                free_bytes,
+                free_percent,
+                threshold_type,
+                threshold_value,
+            } => {
+                let free_str = format_bytes(*free_bytes);
+                if *threshold_type == "bytes" {
+                    let thresh_str = format_bytes(*threshold_value as u64);
+                    write!(
+                        f,
+                        "Low ZRAM: {} available (Limit: {})",
+                        free_str, thresh_str
+                    )
+                } else {
+                    write!(
+                        f,
+                        "Low ZRAM: {} ({:.2}%) available (Limit: {:.2}%)",
                         free_str, free_percent, threshold_value
                     )
                 }
@@ -228,17 +265,13 @@ impl fmt::Display for SentinelEvent {
                 threshold_type,
                 ..
             } => {
-                let observed_str = if threshold_type == "bytes" {
-                    Byte::from_u64(*observed_value as u64)
-                        .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                        .to_string()
+                let observed_str = if *threshold_type == "bytes" {
+                    format_bytes(*observed_value as u64)
                 } else {
                     format!("{:.2}%", observed_value)
                 };
-                let limit_str = if threshold_type == "bytes" {
-                    Byte::from_u64(*threshold_value as u64)
-                        .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                        .to_string()
+                let limit_str = if *threshold_type == "bytes" {
+                    format_bytes(*threshold_value as u64)
                 } else {
                     format!("{:.2}%", threshold_value)
                 };
@@ -255,9 +288,7 @@ impl fmt::Display for SentinelEvent {
                 rss,
                 ..
             } => {
-                let rss_str = Byte::from_u64(*rss)
-                    .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                    .to_string();
+                let rss_str = format_bytes(*rss);
                 write!(
                     f,
                     "Selected Target: {} (PID {}). Score: {}, RSS: {}",
@@ -270,14 +301,15 @@ impl fmt::Display for SentinelEvent {
                 strategy,
                 rss_freed,
             } => {
-                let rss_str = Byte::from_u64(*rss_freed)
-                    .get_appropriate_unit(byte_unit::UnitType::Decimal)
-                    .to_string();
+                let rss_str = format_bytes(*rss_freed);
                 write!(
                     f,
                     "{} {} (PID {}). Freed: {}",
                     strategy, process_name, pid, rss_str
                 )
+            }
+            SentinelEvent::KillSequenceFinished { reason } => {
+                write!(f, "Kill Sequence Finished: {}", reason)
             }
             SentinelEvent::KillSequenceAborted { reason } => {
                 write!(f, "Kill Sequence Aborted: {}", reason)
@@ -289,7 +321,7 @@ impl fmt::Display for SentinelEvent {
     }
 }
 
-impl SentinelEvent {
+impl SentinelEvent<'_> {
     /// Determines the log severity of the current event.
     pub fn severity(&self) -> LogLevel {
         match self {
@@ -300,11 +332,13 @@ impl SentinelEvent {
             SentinelEvent::Startup { .. }
             | SentinelEvent::KillCandidateSelected { .. }
             | SentinelEvent::KillExecuted { .. }
+            | SentinelEvent::KillSequenceFinished { .. }
             | SentinelEvent::KillSequenceAborted { .. }
             | SentinelEvent::KillCandidateIgnored { .. } => LogLevel::Info,
 
             SentinelEvent::LowMemoryWarn { .. }
             | SentinelEvent::LowSwapWarn { .. }
+            | SentinelEvent::LowZramWarn { .. }
             | SentinelEvent::PsiPressureWarn { .. } => LogLevel::Warn,
 
             SentinelEvent::KillTriggered { .. } => LogLevel::Error,

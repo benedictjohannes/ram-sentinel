@@ -5,6 +5,7 @@ mod killer;
 mod logging; // Added
 mod monitor;
 mod psi;
+mod swap;
 mod system;
 mod utils;
 
@@ -57,6 +58,10 @@ struct Cli {
     /// Optional Path to print systemd user unit to. Defaults to stdout.
     #[arg(long, value_name = "FILE", num_args(0..=1), default_missing_value = "-")]
     print_systemd_user_unit: Option<PathBuf>,
+
+    /// Check the configuration for errors and print the effective configuration.
+    #[arg(long)]
+    check_config: bool,
 }
 
 fn handle_output(path_arg: Option<PathBuf>, content: &str) {
@@ -65,19 +70,24 @@ fn handle_output(path_arg: Option<PathBuf>, content: &str) {
         if path.to_string_lossy() == "-" {
             println!("{}", content);
         } else {
+            let msg = format!("Writing content to file: {:?}", path);
             logging::emit(&SentinelEvent::Message {
                 level: LogLevel::Debug,
-                text: format!("Writing content to file: {:?}", path),
+                text: &msg,
             });
             match fs::File::create(&path).and_then(|mut file| file.write_all(content.as_bytes())) {
-                Ok(_) => logging::emit(&SentinelEvent::Message {
-                    level: LogLevel::Debug,
-                    text: format!("Successfully wrote to {:?}", path),
-                }),
+                Ok(_) => {
+                    let msg = format!("Successfully wrote to {:?}", path);
+                    logging::emit(&SentinelEvent::Message {
+                        level: LogLevel::Debug,
+                        text: &msg,
+                    })
+                }
                 Err(e) => {
+                    let msg = format!("Error writing to file {:?}: {}", path, e);
                     logging::emit(&SentinelEvent::Message {
                         level: LogLevel::Error,
-                        text: format!("Error writing to file {:?}: {}", path, e),
+                        text: &msg,
                     });
                     exit(1);
                 }
@@ -97,15 +107,17 @@ fn main() {
     unsafe {
         let handler = SigHandler::Handler(handle_shutdown_signal);
         if let Err(e) = signal(Signal::SIGTERM, handler) {
+            let msg = format!("Failed to register SIGTERM handler: {}", e);
             logging::emit(&SentinelEvent::Message {
                 level: LogLevel::Error,
-                text: format!("Failed to register SIGTERM handler: {}", e),
+                text: &msg,
             });
         }
         if let Err(e) = signal(Signal::SIGINT, handler) {
+            let msg = format!("Failed to register SIGINT handler: {}", e);
             logging::emit(&SentinelEvent::Message {
                 level: LogLevel::Error,
-                text: format!("Failed to register SIGINT handler: {}", e),
+                text: &msg,
             });
         }
     }
@@ -118,18 +130,35 @@ fn main() {
     }
     if args.print_config.is_some() {
         let defaults = Config::sane_defaults();
-        let yaml_content = serde_yaml::to_string(&defaults)
-            .expect("FATAL: Failed to serialize default configuration");
-        handle_output(args.print_config, &yaml_content);
+        let toml_content =
+            toml::to_string(&defaults).expect("FATAL: Failed to serialize default configuration");
+        handle_output(args.print_config, &toml_content);
         return;
+    }
+    if args.check_config {
+        match Config::load_raw_validated(args.config.clone()) {
+            Ok(config) => {
+                let toml_content = toml::to_string(&config)
+                    .expect("FATAL: Failed to serialize validated configuration");
+                println!("Configuration is valid:");
+                println!("");
+                println!("{}", toml_content);
+                exit(0);
+            }
+            Err(e) => {
+                eprintln!("Configuration Error: {}", e);
+                exit(e.exit_code());
+            }
+        }
     }
 
     let ctx = match Config::load(args.config) {
         Ok(c) => c,
         Err(e) => {
+            let msg = format!("Configuration Error: {}", e);
             logging::emit(&SentinelEvent::Message {
                 level: LogLevel::Error,
-                text: format!("Configuration Error: {}", e),
+                text: &msg,
             });
             exit(e.exit_code());
         }
@@ -156,22 +185,21 @@ fn run_loop(ctx: RuntimeContext, no_kill: bool) {
                 if no_kill {
                     logging::emit(&SentinelEvent::Message {
                         level: LogLevel::Info,
-                        text: "--no-kill active. Skipping kill sequence.".to_string(),
+                        text: "--no-kill active. Skipping kill sequence.",
                     });
                 } else {
                     if let SentinelEvent::KillTriggered { amount_needed, .. } = &event {
                         if let Some(needed) = *amount_needed {
                             killer.kill_sequence(&ctx, Some(needed));
                         } else {
-                            logging::emit(&SentinelEvent::KillSequenceAborted {
-                                reason: "Kill triggered but amount_needed is None/Zero".to_string(),
+                            logging::emit(&SentinelEvent::KillSequenceFinished {
+                                reason: "Kill triggered but amount_needed is None/Zero",
                             });
                         }
                     } else {
                         logging::emit(&SentinelEvent::Message {
                             level: LogLevel::Error,
-                            text: "Monitor returned non-KillTriggered event in Kill status"
-                                .to_string(),
+                            text: "Monitor returned non-KillTriggered event in Kill status",
                         });
                     }
                 }
@@ -182,6 +210,6 @@ fn run_loop(ctx: RuntimeContext, no_kill: bool) {
 
     logging::emit(&SentinelEvent::Message {
         level: LogLevel::Info,
-        text: "Exiting ram-sentinel.".to_string(),
+        text: "Exiting ram-sentinel.",
     });
 }

@@ -1,0 +1,91 @@
+# RAM Sentinel Configuration Example 🛡️
+# This file showcases the recommended settings for desktop users.
+# Save this to ~/.config/ram-sentinel.toml
+
+# --- OPERATIONAL SETTINGS ---
+check_interval_ms = 1000        # Poll system stats every 1s (balanced response/CPU)
+warn_reset_ms = 60000           # Don't spam notifications more than every 60s
+sigterm_wait_ms = 5000          # Give apps 5s to save/close before "The Hammer" (SIGKILL)
+
+# --- SURGICAL TARGETING ---
+# ram-sentinel uses a "Tiered Hit List" strategy.
+# Priority: What gets listed first, gets killed first.
+
+# Matching Rules:
+# 1. Regex: "/pattern/" matches Name or Command Line
+# 2. Prefix: "^string" matches START of Command Line
+# 3. Substring: "string" matches Name or Command Line
+# 4. Scoped (Dual-Layer): "@[CGROUP_PATTERN]@ CMDLINE_PATTERN"
+#    If specified, matches cgroup v2 path FIRST, then cmdline.
+
+kill_targets = [
+  # Browser tabs (Surgical strikes)
+  "@[/Chromium|chrome|edge/]@ type=renderer",  # Chromium renderers: kill some tabs, not whole browser
+  "-contentproc",                              # Firefox tabs
+  
+  # Development servers / scripts
+  "npm run start",              # NPM scripts (Substring)
+  
+  # Heavy Desktop Apps
+  "slack",                      # Electron app (Substring)
+  "discord",                    # Electron app (Substring)
+  "@[/app.slice/]@ intellij",   # Target IntelliJ only if it's in app.slice
+]
+
+# If true, allow killing processes that don't match 'kill_targets' when it's populated.
+# Set to false to ensure only kill_targets are ever touched.
+# When false, and all kill_targets are gone but memory is still low, ram-sentinel 
+# will stop killing (safety first).
+allow_kill_outside_targets = false
+
+# --- GUARDIAN PROTECTION ---
+# Processes to NEVER kill (Same matching rules as kill_targets)
+ignore_names = [
+  "@[/session.slice/]@ /./",    # PROTECT: All core desktop and session services
+  "sshd",                       # PROTECT: Don't lock yourself out of a server!
+  "ram-sentinel"                # PROTECT: Don't kill self
+]
+
+# Sorting within a kill target: 'highest_oom_score' (recommended) or 'largest_rss'
+# 'highest_oom_score' uses the kernel's own "low-value" ranking.
+kill_strategy = "highest_oom_score"
+
+# --- RAM, ZRAM & SWAP TRIGGER SYSTEM ---
+# Triggers if Available RAM/Swap falls below these values.
+# LOGIC: Explicit 'bytes' (e.g. "1GB") always OVERRIDES 'percent' (e.g. 5.0).
+# Leave one as None/commented to use the other.
+# Monitoring is only enabled when the any metric is enabled/uncommented
+
+[ram]
+warn_min_free_percent = 10.0          # Warn = Signal to start saving your work (desktop notification)
+kill_min_free_percent = 5.0           # Kill = Start killing until this is met
+# warn_min_free_bytes   = "1500MB"    # Bytes override percent
+# kill_min_free_bytes   = "800MB"     # Bytes override percent
+
+[zram]
+# ZRAM is compressed RAM used as swap. 
+# This monitor tracks the logical (virtual) capacity of the ZRAM device.
+# Due to zram's nature, it is monitored separately from  
+# regular disk backed swap.
+# Enable if you use zram-generator, zram-tools, or similar.
+warn_min_free_percent = 5.0     # Warn when zram is filling up
+# kill_min_free_percent = 10.0  # We do not recommend enabling killing with zram. RAM monitoring is more reliable due to non-deterministic compression ratio of zram.
+# warn_min_free_bytes   = ""
+# kill_min_free_bytes   = ""
+
+[swap]
+# Disk-backed swap. Enable if you have a swapfile.
+# warn_min_free_percent = 15.0
+# kill_min_free_percent = 5.0
+# warn_min_free_bytes   = ""
+# kill_min_free_bytes   = ""
+
+# --- ANTI-FREEZE (PSI - PRESSURE STALL INFORMATION) ---
+# Pressure = % of time CPU/Tasks are stalled waiting for memory.
+# This prevents "The Deadlock" where the system is too busy for the CPU 
+# to even trigger the RAM/Swap limits. HIGHLY RECOMMENDED.
+[psi]
+warn_max_percent = 40.0     # "Stuttering" detected (Yellow alert)
+kill_max_percent = 85.0     # "Lockup Imminent" (Red alert)
+amount_to_free = "1GB"      # If psi triggers, kill until this amount is freed
+# check_interval_ms = 5000  # PSI has its own polling interval (defaults to 10x global)

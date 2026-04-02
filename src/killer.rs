@@ -3,17 +3,32 @@ use crate::events::SentinelEvent;
 use crate::logging;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::{Pid as NixPid, SysconfVar, Uid, sysconf};
-use std::fmt::Write; // For writing to path_buffer
+use std::fmt::Write; // For writing to path_buffer / reason_buffer
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{self, Read};
 use std::thread;
 use std::time::Duration;
 
 pub struct Killer {
-    // Buffers for zero-allocation logic
-    read_buffer: Vec<u8>,
+    /// Dedicated buffer for cmdline to avoid repeated IO per pattern.
+    cmdline_cache: Vec<u8>,
+    cmdline_len: Option<usize>,
+    /// Dedicated buffer for cgroup to avoid repeated IO per pattern.
+    cgroup_cache: Vec<u8>,
+    cgroup_len: Option<usize>,
+    /// Scratch buffer for transient reads (stat, statm, oom_score, etc.).
+    scratch_buffer: Vec<u8>,
     path_buffer: String,
+    name_buffer: String,
+    /// Pre-allocated scratch space for dynamic abort/ignore reason strings.
+    /// Formatted with `write!` before being passed as `&str` to SentinelEvent.
+    reason_buffer: String,
     page_size: u64,
+    /// Buffer to track processes that failed to kill during a single sequence.
+    /// This prevents an unkillable process from stalling the guardian forever.
+    failed_pids: [u32; 64],
+    /// Count of failed kills in the current sequence.
+    failed_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -35,74 +50,114 @@ impl Killer {
 
         Self {
             // Pre-allocate AND initialize to ensure pages are physically backed (prevent page faults during OOM)
-            read_buffer: vec![0u8; 256 * 1024],
+            cmdline_cache: vec![0u8; 128 * 1024],
+            cmdline_len: None,
+            cgroup_cache: vec![0u8; 8 * 1024],
+            cgroup_len: None,
+            scratch_buffer: vec![0u8; 64 * 1024],
             path_buffer: String::with_capacity(256),
+            name_buffer: String::with_capacity(128),
+            reason_buffer: String::with_capacity(256),
             page_size,
+            failed_pids: [0; 64],
+            failed_count: 0,
         }
     }
 
     pub fn kill_sequence(&mut self, ctx: &RuntimeContext, mut amount_needed: Option<u64>) {
+        // Zero out the skip buffer and counter at the start of each sequence
+        self.failed_count = 0;
+        self.failed_pids.fill(0);
+
         loop {
+            self.reason_buffer.clear();
             // 1. Scan /proc and find the best candidate ("The Champion")
             let champion_opt = self.find_champion(ctx);
 
-            if let Some(champion) = champion_opt {
-                // Fetch name for logging (on-demand, after scan loop)
-                let name = self
-                    .get_process_name(champion.pid)
-                    .unwrap_or_else(|| "unknown".to_string());
+            let Some(champion) = champion_opt else {
+                self.log_sequence_aborted(format_args!("No eligible kill candidates found!"));
+                break;
+            };
 
-                logging::emit(&SentinelEvent::KillCandidateSelected {
-                    pid: champion.pid,
-                    process_name: name.clone(),
-                    score: champion.score,
-                    rss: champion.rss,
-                    match_index: champion.match_index,
-                });
+            // Fetch name for logging (on-demand, after scan loop)
+            self.get_process_name(champion.pid);
 
-                // 2. Kill Logic
-                match self.kill_process(ctx, &champion, &name) {
-                    Some(freed_bytes) => {
-                        if let Some(needed) = amount_needed {
-                            if freed_bytes >= needed {
-                                logging::emit(&SentinelEvent::KillSequenceAborted {
-                                    reason: format!("Freed {} bytes. Target reached.", freed_bytes),
-                                });
-                                break;
-                            } else {
-                                amount_needed = Some(needed - freed_bytes);
-                            }
-                        } else {
-                            // If no specific amount was requested, stop after one kill
+            // Pass &name_buffer directly — zero copy.
+            // NOTE: reason_buffer may also be populated below; they are separate fields so no aliasing.
+            logging::emit(&SentinelEvent::KillCandidateSelected {
+                pid: champion.pid,
+                process_name: &self.name_buffer,
+                score: champion.score,
+                rss: champion.rss,
+                match_index: champion.match_index,
+            });
+
+            // 2. Kill Logic
+            // kill_process needs &mut self (for read_file_into_buffer in identity check),
+            // so we must clone the name first. This single allocation happens only once
+            // per kill iteration — outside the hot discovery loop.
+            let name_owned = self.name_buffer.clone();
+
+            match self.kill_process(ctx, &champion, &name_owned) {
+                KillOutcome::Freed(freed_bytes) => {
+                    if let Some(needed) = amount_needed {
+                        if freed_bytes >= needed {
+                            self.log_sequence_finished(format_args!(
+                                "Freed {} bytes. Target reached.",
+                                freed_bytes
+                            ));
                             break;
+                        } else {
+                            amount_needed = Some(needed - freed_bytes);
+                            // Continue to kill next candidate
                         }
-                    }
-                    None => {
-                        logging::emit(&SentinelEvent::KillSequenceAborted {
-                            reason: format!(
-                                "Failed to kill victim PID {} {}. Aborting.",
-                                champion.pid, name
-                            ),
-                        });
+                    } else {
+                        // If no specific amount was requested, stop after one kill
                         break;
                     }
                 }
-            } else {
-                logging::emit(&SentinelEvent::KillSequenceAborted {
-                    reason: "No eligible kill candidates found!".to_string(),
-                });
-                break;
+                KillOutcome::PidReused => {
+                    // The "victim" slot was already filled by a new process.
+                    // This is not a failure — re-run find_champion to pick a fresh target.
+                    logging::emit(&SentinelEvent::KillCandidateIgnored {
+                        pid: champion.pid,
+                        reason: "PID Reuse detected during wait — retrying.",
+                    });
+                    continue;
+                }
+                KillOutcome::Failed => {
+                    if self.failed_count < self.failed_pids.len() {
+                        self.failed_pids[self.failed_count] = champion.pid;
+                        self.failed_count += 1;
+
+                        // We use the same reason allocation trick or just static strings to prevent allocations
+                        logging::emit(&SentinelEvent::KillCandidateIgnored {
+                            pid: champion.pid,
+                            reason: "Kill failed with hard error. Skipping process.",
+                        });
+                        continue;
+                    } else {
+                        self.log_sequence_aborted(format_args!(
+                            "Failed to kill victim PID {} ({}). Max failures (64) reached. Aborting.",
+                            champion.pid, name_owned
+                        ));
+                        break;
+                    }
+                }
             }
         }
     }
 
-    fn get_process_name(&mut self, pid: u32) -> Option<String> {
-        if self.read_file_into_buffer(&pid.to_string(), "comm").is_ok() {
-            std::str::from_utf8(&self.read_buffer)
-                .ok()
-                .map(|s| s.trim().to_string()) // only allocate the small trimmed string
+    fn get_process_name(&mut self, pid: u32) {
+        self.name_buffer.clear();
+        if self.read_file_into_scratch(pid, "comm").is_ok() {
+            if let Ok(s) = std::str::from_utf8(&self.scratch_buffer) {
+                self.name_buffer.push_str(s.trim());
+            } else {
+                self.name_buffer.push_str("unknown");
+            }
         } else {
-            None
+            self.name_buffer.push_str("unknown");
         }
     }
 
@@ -119,9 +174,7 @@ impl Killer {
         let entries = match fs::read_dir("/proc") {
             Ok(iter) => iter,
             Err(e) => {
-                logging::emit(&SentinelEvent::KillSequenceAborted {
-                    reason: format!("Failed to read /proc: {}", e),
-                });
+                let _ = write!(self.reason_buffer, "Failed to read /proc: {}", e);
                 return None;
             }
         };
@@ -146,10 +199,21 @@ impl Killer {
                     continue;
                 }
 
-                // Filter 3: Ownership Check (if not root)
+                // Filter 3: Skip pids that failed to be killed earlier in this sequence
+                let mut is_failed = false;
+                for i in 0..self.failed_count {
+                    if self.failed_pids[i] == pid {
+                        is_failed = true;
+                        break;
+                    }
+                }
+                if is_failed {
+                    continue;
+                }
+
+                // Filter 4: Ownership Check (if not root)
                 if !is_root {
                     use std::os::unix::fs::MetadataExt;
-                    // Avoid stat call if possible, but we need UID. entry.metadata() is cached from readdir? No, usually distinct.
                     if let Ok(meta) = entry.metadata() {
                         if meta.uid() != current_uid.as_raw() {
                             continue;
@@ -160,31 +224,17 @@ impl Killer {
                 }
 
                 // ---------------------------------------------------------
-                // Analyze Process
+                // Analyze Process (Cgroup & Cmdline Matching)
                 // ---------------------------------------------------------
 
-                // A. Determine Match Priority (Read cmdline)
-                if self
-                    .read_file_into_buffer(file_name_str, "cmdline")
-                    .is_err()
-                {
-                    continue; // Process likely gone
-                }
-
-                // Replace nulls with spaces
-                for b in self.read_buffer.iter_mut() {
-                    if *b == 0 {
-                        *b = 32;
-                    }
-                }
-
-                // Cow::Borrowed if UTF-8, Owned if not.
-                let cmdline_cow = String::from_utf8_lossy(&self.read_buffer);
+                // RESET CACHES PER PID
+                self.cmdline_len = None;
+                self.cgroup_len = None;
 
                 // Check Ignored
                 let mut ignored = false;
                 for pat in &ctx.ignore_names_regex {
-                    if pat.matches(&cmdline_cow) {
+                    if self.matches_target(pid, pat) {
                         ignored = true;
                         break;
                     }
@@ -196,83 +246,83 @@ impl Killer {
                 // Calculate Match Index
                 let mut match_index = usize::MAX;
                 for (idx, pat) in ctx.kill_targets_regex.iter().enumerate() {
-                    if pat.matches(&cmdline_cow) {
+                    if let Some(champ) = &current_champion {
+                        // Current process has lower kill_target priority than current champion
+                        if idx > champ.match_index {
+                            // skip this process
+                            break;
+                        }
+                    }
+
+                    if self.matches_target(pid, pat) {
                         match_index = idx;
                         break;
                     }
                 }
 
-                // Check vs Current Champion (Optimization)
+                if match_index == usize::MAX
+                    && !ctx.kill_targets_regex.is_empty()
+                    && !ctx.allow_kill_outside_targets
+                {
+                    continue;
+                }
+
+                // Targeting Strategy 2:
+                // If we already have a champion with a lower kill_targets match index, skip.
                 if let Some(champ) = &current_champion {
                     if match_index > champ.match_index {
                         continue;
                     }
                 }
 
-                // B. Calculate Score & RSS
+                // B. Resource Check: Read RSS when the process is still alive.
                 let mut rss = 0;
-                let mut score = 0;
-
-                match ctx.kill_strategy {
-                    KillStrategy::LargestRss => {
-                        // Read statm for RSS
-                        if self.read_file_into_buffer(file_name_str, "statm").is_ok() {
-                            // format: total resident share ...
-                            if let Ok(s) = std::str::from_utf8(&self.read_buffer) {
-                                let mut parts = s.split_whitespace();
-                                if let Some(_total) = parts.next() {
-                                    if let Some(res) = parts.next() {
-                                        if let Ok(pages) = res.parse::<u64>() {
-                                            rss = pages * self.page_size;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        score = rss;
-                    }
-                    KillStrategy::HighestOomScore => {
-                        // Read oom_score
-                        if self
-                            .read_file_into_buffer(file_name_str, "oom_score")
-                            .is_ok()
-                        {
-                            if let Ok(s) = std::str::from_utf8(&self.read_buffer) {
-                                if let Ok(val) = s.trim().parse::<i32>() {
-                                    score = val as u64;
-                                }
+                if self.read_file_into_scratch(pid, "statm").is_ok() {
+                    if let Ok(s) = std::str::from_utf8(&self.scratch_buffer) {
+                        let mut parts = s.split_whitespace();
+                        if let (Some(_total), Some(res)) = (parts.next(), parts.next()) {
+                            if let Ok(pages) = res.parse::<u64>() {
+                                rss = pages * self.page_size;
                             }
                         }
                     }
                 }
 
-                // Final Comparison
-                if let Some(champ) = &current_champion {
-                    if match_index == champ.match_index {
-                        if score <= champ.score {
-                            continue;
+                // C. Calculate Score
+                let score = match ctx.kill_strategy {
+                    KillStrategy::LargestRss => rss,
+                    KillStrategy::HighestOomScore => {
+                        let mut s = 0;
+                        if self.read_file_into_scratch(pid, "oom_score").is_ok() {
+                            if let Ok(st) = std::str::from_utf8(&self.scratch_buffer) {
+                                if let Ok(val) = st.trim().parse::<i32>() {
+                                    // oom_score can be negative (e.g. -1000 for exempt).
+                                    // Clamp to 0 to avoid massive wrap-around when casting to u64.
+                                    s = if val < 0 { 0 } else { val as u64 };
+                                }
+                            }
                         }
-                    } else if match_index > champ.match_index {
+                        s
+                    }
+                };
+
+                // Final Comparison vs Current Champion.
+                // At this point match_index <= champ.match_index (ensured by early skip above).
+                // If equal index, only promote if this candidate has a strictly higher score.
+                if let Some(champ) = &current_champion {
+                    if match_index == champ.match_index && score <= champ.score {
                         continue;
                     }
+                    // If match_index < champ.match_index: implicit promotion (fall through).
                 }
 
-                // C. Become the Champion (Read stat for Start Time)
-                if self.read_file_into_buffer(file_name_str, "stat").is_ok() {
-                    if let Ok(s) = std::str::from_utf8(&self.read_buffer) {
-                        // Robust parsing: "pid (comm) state ppid ..."
-                        // Use split_once on ") " to correctly handle ')' in comm
-                        if let Some((_before, after_comm)) = s.split_once(") ") {
-                            // fields in after_comm:
-                            // 0:state ... 19:starttime (index 19 in this slice? No, count carefully)
-                            // Global stat fields:
-                            // 1: pid, 2: comm, 3: state, ..., 22: starttime
-                            // after_comm starts at field 3 (state).
-                            // So index 0 = field 3.
-                            // We want field 22.
-                            // Offset = 22 - 3 = 19.
-                            // So .nth(19) is correct.
-
+                // D. Become the Champion (Read stat for Start Time)
+                // Field 22 (starttime) in /proc/[pid]/stat. After splitting on ") " (which
+                // skips past the comm field), the remaining fields are 0-indexed as:
+                // 0=state, 1=ppid, ..., 19=starttime.
+                if self.read_file_into_scratch(pid, "stat").is_ok() {
+                    if let Ok(s) = std::str::from_utf8(&self.scratch_buffer) {
+                        if let Some((_, after_comm)) = s.rsplit_once(") ") {
                             if let Some(start_time_str) = after_comm.split_whitespace().nth(19) {
                                 if let Ok(st) = start_time_str.parse::<u64>() {
                                     current_champion = Some(Champion {
@@ -281,29 +331,7 @@ impl Killer {
                                         rss,
                                         match_index,
                                         start_time: st,
-                                        // Name removed to avoid allocation
                                     });
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Post-Loop: If strategy was OOM Score, we might have 0 RSS in the champion.
-        if let Some(ref mut champ) = current_champion {
-            if champ.rss == 0 {
-                if self
-                    .read_file_into_buffer(&champ.pid.to_string(), "statm")
-                    .is_ok()
-                {
-                    if let Ok(s) = std::str::from_utf8(&self.read_buffer) {
-                        let mut parts = s.split_whitespace();
-                        if let Some(_total) = parts.next() {
-                            if let Some(res) = parts.next() {
-                                if let Ok(pages) = res.parse::<u64>() {
-                                    champ.rss = pages * self.page_size;
                                 }
                             }
                         }
@@ -315,96 +343,286 @@ impl Killer {
         current_champion
     }
 
-    fn read_file_into_buffer(&mut self, pid_str: &str, file: &str) -> std::io::Result<usize> {
+    fn matches_target(&mut self, pid: u32, target: &crate::config::TargetPattern) -> bool {
+        // 1. Cgroup Check (Short-circuit)
+        if let Some(cgroup_pat) = &target.cgroup {
+            if self.cgroup_len.is_none() {
+                // Lazy load cgroup
+                self.path_buffer.clear();
+                let _ = write!(self.path_buffer, "/proc/{}/cgroup", pid);
+                if let Ok(mut f) = File::open(&self.path_buffer) {
+                    let capacity = self.cgroup_cache.capacity();
+                    self.cgroup_cache.resize(capacity, 0);
+                    if let Ok(n) = f.read(&mut self.cgroup_cache) {
+                        self.cgroup_cache.truncate(n);
+                        self.cgroup_len = Some(n);
+                    } else {
+                        self.cgroup_cache.truncate(0);
+                        self.cgroup_len = Some(0);
+                    }
+                } else {
+                    self.cgroup_len = Some(0);
+                }
+            }
+
+            let len = self.cgroup_len.unwrap_or(0);
+            if len == 0 {
+                return false;
+            }
+
+            if let Ok(s) = std::str::from_utf8(&self.cgroup_cache[..len]) {
+                // Find the cgroup v2 unified hierarchy line (starts with "0::")
+                let mut v2_path = None;
+                for line in s.lines() {
+                    if let Some(p) = line.strip_prefix("0::") {
+                        // Found cgroup v2. Normalize empty path to "/" (root)
+                        v2_path = Some(if p.is_empty() { "/" } else { p });
+                        break;
+                    }
+                }
+
+                let Some(path) = v2_path else {
+                    // Cgroup v2 hierarchy entry not found for this process.
+                    return false;
+                };
+
+                if !cgroup_pat.matches(path.trim()) {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+
+        // 2. Cmdline Check
+        if self.cmdline_len.is_none() {
+            // Lazy load cmdline
+            self.path_buffer.clear();
+            let _ = write!(self.path_buffer, "/proc/{}/cmdline", pid);
+            if let Ok(mut f) = File::open(&self.path_buffer) {
+                let capacity = self.cmdline_cache.capacity();
+                self.cmdline_cache.resize(capacity, 0);
+                if let Ok(n) = f.read(&mut self.cmdline_cache) {
+                    // Replace nulls with spaces for matching ONLY ONCE per process
+                    for b in self.cmdline_cache[..n].iter_mut() {
+                        if *b == 0 {
+                            *b = 32;
+                        }
+                    }
+                    self.cmdline_cache.truncate(n);
+                    self.cmdline_len = Some(n);
+                } else {
+                    self.cmdline_cache.truncate(0);
+                    self.cmdline_len = Some(0);
+                }
+            } else {
+                self.cmdline_len = Some(0);
+            }
+        }
+
+        let len = self.cmdline_len.unwrap_or(0);
+        if len == 0 {
+            return false;
+        }
+
+        if let Ok(s) = std::str::from_utf8(&self.cmdline_cache[..len]) {
+            return target.cmdline.matches(s);
+        }
+
+        false
+    }
+
+    fn read_file_into_scratch(&mut self, pid: u32, file: &str) -> std::io::Result<usize> {
         self.path_buffer.clear();
-        write!(self.path_buffer, "/proc/{}/{}", pid_str, file).unwrap();
+        write!(self.path_buffer, "/proc/{}/{}", pid, file).unwrap();
 
         let mut f = File::open(&self.path_buffer)?;
 
-        // Zero-allocation read: reuse capacity
-        self.read_buffer.clear();
-        let capacity = self.read_buffer.capacity();
+        self.scratch_buffer.clear();
+        let capacity = self.scratch_buffer.capacity();
 
-        // Safety: We treat the buffer as uninitialized (though it was 0-filled or has old data).
-        // File::read will overwrite.
-        unsafe {
-            self.read_buffer.set_len(capacity);
-        }
+        // We zero the buffer to prevent stale data. Tradeoff to avoid unsafe set_len.
+        self.scratch_buffer.resize(capacity, 0);
 
-        let bytes_read = f.read(&mut self.read_buffer)?;
+        let bytes_read = match f.read(&mut self.scratch_buffer) {
+            Ok(n) => n,
+            Err(e) => {
+                self.scratch_buffer.clear();
+                return Err(e);
+            }
+        };
 
-        unsafe {
-            self.read_buffer.set_len(bytes_read);
-        }
+        // Truncate to exactly what was read so all subsequent slice access is correct.
+        self.scratch_buffer.truncate(bytes_read);
 
         Ok(bytes_read)
     }
 
-    fn kill_process(&mut self, ctx: &RuntimeContext, victim: &Champion, name: &str) -> Option<u64> {
+    fn verify_identity(&mut self, pid: u32, expected_st: u64) -> IdentityCheck {
+        match self.read_file_into_scratch(pid, "stat") {
+            Ok(_) => {
+                let verified = match std::str::from_utf8(&self.scratch_buffer) {
+                    Ok(s) => s
+                        .rsplit_once(") ")
+                        .and_then(|(_, after_comm)| after_comm.split_whitespace().nth(19))
+                        .and_then(|st_str| st_str.parse::<u64>().ok())
+                        .map(|new_st| new_st == expected_st),
+                    Err(_) => None,
+                };
+
+                match verified {
+                    Some(true) => IdentityCheck::Match,
+                    Some(false) => IdentityCheck::PidReused,
+                    None => {
+                        let _ = write!(
+                            self.reason_buffer,
+                            "Failed to verify process identity for PID {} (parse error).",
+                            pid
+                        );
+                        IdentityCheck::Error
+                    }
+                }
+            }
+            Err(e) if e.kind() == io::ErrorKind::NotFound => IdentityCheck::ProcessGone,
+            Err(e) => {
+                let _ = write!(
+                    self.reason_buffer,
+                    "Failed to verify process identity for PID {} ({}).",
+                    pid, e
+                );
+                IdentityCheck::Error
+            }
+        }
+    }
+
+    fn kill_process(&mut self, ctx: &RuntimeContext, victim: &Champion, name: &str) -> KillOutcome {
         let nix_pid = NixPid::from_raw(victim.pid as i32);
 
-        // 1. Send SIGTERM
-        if let Err(e) = kill(nix_pid, Signal::SIGTERM) {
-            if e == nix::errno::Errno::ESRCH {
-                logging::emit(&SentinelEvent::KillCandidateIgnored {
+        // 1. Initial Identity Check: Ensure it hasn't been reused since the scan
+        match self.verify_identity(victim.pid, victim.start_time) {
+            IdentityCheck::Match => {}
+            IdentityCheck::PidReused => return KillOutcome::PidReused,
+            IdentityCheck::ProcessGone => {
+                logging::emit(&SentinelEvent::KillExecuted {
                     pid: victim.pid,
-                    reason: "ESRCH (Already gone)".to_string(),
+                    process_name: name,
+                    strategy: "Already exited",
+                    rss_freed: victim.rss,
                 });
-                return Some(victim.rss);
+                return KillOutcome::Freed(victim.rss);
             }
-            logging::emit(&SentinelEvent::KillSequenceAborted {
-                reason: format!("Failed to send SIGTERM to {}: {}", victim.pid, e),
-            });
-            return None;
+            IdentityCheck::Error => return KillOutcome::Failed,
+        }
+
+        // 2. Send SIGTERM
+        match kill(nix_pid, Signal::SIGTERM) {
+            Ok(_) => {}
+            Err(nix::errno::Errno::ESRCH) => {
+                // Process already gone — treat as success.
+                logging::emit(&SentinelEvent::KillExecuted {
+                    pid: victim.pid,
+                    process_name: name,
+                    strategy: "SIGTERM (immediate exit)",
+                    rss_freed: victim.rss,
+                });
+                return KillOutcome::Freed(victim.rss);
+            }
+            Err(e) => {
+                let _ = write!(
+                    self.reason_buffer,
+                    "Failed to send SIGTERM to {}: {}",
+                    victim.pid, e
+                );
+                return KillOutcome::Failed;
+            }
         }
 
         thread::sleep(Duration::from_millis(ctx.sigterm_wait_ms));
 
-        // 2. Verify Identity (PID Reuse Check)
-        if self
-            .read_file_into_buffer(&victim.pid.to_string(), "stat")
-            .is_ok()
-        {
-            if let Ok(s) = std::str::from_utf8(&self.read_buffer) {
-                if let Some((_before, after_comm)) = s.split_once(") ") {
-                    if let Some(start_time_str) = after_comm.split_whitespace().nth(19) {
-                        if let Ok(new_st) = start_time_str.parse::<u64>() {
-                            if new_st != victim.start_time {
-                                logging::emit(&SentinelEvent::KillCandidateIgnored {
-                                    pid: victim.pid,
-                                    reason: "PID Reuse detected during wait".to_string(),
-                                });
-                                return Some(victim.rss);
-                            }
-                        }
-                    }
-                }
+        // 3. Second Identity Check: Ensure it hasn't been reused during the SIGTERM wait
+        match self.verify_identity(victim.pid, victim.start_time) {
+            IdentityCheck::Match => {}
+            IdentityCheck::PidReused => return KillOutcome::PidReused,
+            IdentityCheck::ProcessGone => {
+                // Process GONE — SIGTERM was enough.
+                logging::emit(&SentinelEvent::KillExecuted {
+                    pid: victim.pid,
+                    process_name: name,
+                    strategy: "SIGTERM",
+                    rss_freed: victim.rss,
+                });
+                return KillOutcome::Freed(victim.rss);
             }
-        } else {
-            // Process GONE
-            logging::emit(&SentinelEvent::KillExecuted {
-                pid: victim.pid,
-                process_name: name.to_string(),
-                strategy: "SIGTERM".to_string(),
-                rss_freed: victim.rss,
-            });
-            return Some(victim.rss);
+            IdentityCheck::Error => return KillOutcome::Failed,
         }
 
-        // 3. SIGKILL
-        if let Err(e) = kill(nix_pid, Signal::SIGKILL) {
-            logging::emit(&SentinelEvent::KillSequenceAborted {
-                reason: format!("Failed to send SIGKILL to {}: {}", victim.pid, e),
-            });
-            return None;
+        // 4. SIGKILL
+        match kill(nix_pid, Signal::SIGKILL) {
+            Ok(_) => {}
+            Err(nix::errno::Errno::ESRCH) => {
+                // Process died between SIGTERM wait and SIGKILL — that's fine.
+                logging::emit(&SentinelEvent::KillExecuted {
+                    pid: victim.pid,
+                    process_name: name,
+                    strategy: "SIGTERM (late exit)",
+                    rss_freed: victim.rss,
+                });
+                return KillOutcome::Freed(victim.rss);
+            }
+            Err(e) => {
+                let _ = write!(
+                    self.reason_buffer,
+                    "Failed to send SIGKILL to {}: {}",
+                    victim.pid, e
+                );
+                return KillOutcome::Failed;
+            }
         }
 
         logging::emit(&SentinelEvent::KillExecuted {
             pid: victim.pid,
-            process_name: name.to_string(),
-            strategy: "SIGKILL".to_string(),
+            process_name: name,
+            strategy: "SIGKILL",
             rss_freed: victim.rss,
         });
-        Some(victim.rss)
+        KillOutcome::Freed(victim.rss)
     }
+
+    /// Internal helper to format a reason into `reason_buffer` and emit a `KillSequenceFinished` event.
+    fn log_sequence_finished(&mut self, args: std::fmt::Arguments) {
+        if self.reason_buffer.is_empty() {
+            let _ = self.reason_buffer.write_fmt(args);
+        }
+        logging::emit(&SentinelEvent::KillSequenceFinished {
+            reason: &self.reason_buffer,
+        });
+    }
+
+    /// Internal helper to format a reason into `reason_buffer` and emit a `KillSequenceAborted` event.
+    fn log_sequence_aborted(&mut self, args: std::fmt::Arguments) {
+        if self.reason_buffer.is_empty() {
+            let _ = self.reason_buffer.write_fmt(args);
+        }
+        logging::emit(&SentinelEvent::KillSequenceAborted {
+            reason: &self.reason_buffer,
+        });
+    }
+}
+
+enum IdentityCheck {
+    Match,
+    PidReused,
+    ProcessGone,
+    Error,
+}
+
+/// Result of a single kill attempt.
+enum KillOutcome {
+    /// Signal delivered; `u64` is the RSS we expect to be freed.
+    Freed(u64),
+    /// The target PID was reused by a new process before we could kill it.
+    /// Caller should re-run find_champion instead of aborting.
+    PidReused,
+    /// A fatal error occurred (permission denied, etc.); caller should abort.
+    Failed,
 }
